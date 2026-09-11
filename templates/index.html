@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>巡演器材装载推演</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">▰</span>
+    <div>
+      <h1>巡演器材装载推演</h1>
+      <p>俯视 / 侧视 / 尾门视图联动 · 轴荷、层载、点载与倒箱检查</p>
+    </div>
+  </div>
+  <div class="plan-controls">
+    <select id="planSelect" title="已保存方案"></select>
+    <button id="newPlanBtn" type="button">新建</button>
+    <button id="sampleBtn" type="button">载入内置坏方案</button>
+    <button id="saveBtn" class="primary" type="button">保存版本</button>
+    <button id="confirmBtn" class="success" type="button">确认快照</button>
+    <button id="autoBtn" class="accent" type="button">自动编排</button>
+    <div class="export-menu">
+      <button id="exportBtn" type="button">下载 ▾</button>
+      <div class="menu" id="exportMenu">
+        <button data-export="loading">装车顺序 Markdown</button>
+        <button data-export="unloading">各站卸货步骤</button>
+        <button data-export="layers">逐层 SVG</button>
+        <button data-export="layers-json">SVG JSON</button>
+        <button data-export="recompute">复算 JSON</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="workspace">
+  <aside class="sidebar">
+    <div class="plan-name-row">
+      <input id="planName" type="text" placeholder="方案名称">
+      <span id="statusPill" class="pill">--</span>
+    </div>
+    <nav class="tabs">
+      <button data-tab="arrange" class="active">装载</button>
+      <button data-tab="stops">站点</button>
+      <button data-tab="truck">车辆</button>
+      <button data-tab="data">载入数据</button>
+      <button data-tab="versions">版本</button>
+    </nav>
+
+    <section class="tab-panel active" data-panel="arrange">
+      <div id="selectedCard" class="selected-card empty">请在任一视图选择航空箱</div>
+      <h2>航空箱清单</h2>
+      <div class="table-wrap">
+        <table id="caseTable">
+          <thead><tr><th>箱体</th><th>站点</th><th>位置/重量</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tab-panel" data-panel="stops">
+      <h2>城市顺序</h2>
+      <p class="hint">靠前的站点先卸货；顺序改变后再保存，会与已确认快照对比并列出受影响箱体。</p>
+      <ol id="stopList" class="stop-list"></ol>
+      <button id="addStopBtn" type="button">添加站点</button>
+    </section>
+
+    <section class="tab-panel" data-panel="truck">
+      <h2>舱体 / 车轴 / 门洞</h2>
+      <div class="form-grid">
+        <label>车长 m<input id="truckLength" type="number" step="0.05"></label>
+        <label>车宽 m<input id="truckWidth" type="number" step="0.05"></label>
+        <label>车高 m<input id="truckHeight" type="number" step="0.05"></label>
+        <label>平均地载 kg/m²<input id="floorLimit" type="number" step="10"></label>
+        <label>点载 kg/0.1m 格<input id="pointLimit" type="number" step="10"></label>
+        <label>总重上限 kg<input id="gvwLimit" type="number" step="100"></label>
+        <label>门洞宽 m<input id="doorWidth" type="number" step="0.05"></label>
+        <label>门洞高 m<input id="doorHeight" type="number" step="0.05"></label>
+        <label>门槛高 m<input id="doorSill" type="number" step="0.05"></label>
+      </div>
+      <h3>车轴（x 自尾门起）</h3>
+      <div id="axleEditor" class="axle-list"></div>
+      <button id="addAxleBtn" type="button">添加车轴</button>
+    </section>
+
+    <section class="tab-panel" data-panel="data">
+      <h2>载入舱体、站点与清单</h2>
+      <p class="hint">粘贴 state JSON（包含 truck、stops、cases、placements）。也可只放清单后自动编排。</p>
+      <textarea id="jsonInput" spellcheck="false"></textarea>
+      <div class="button-row">
+        <button id="applyJsonBtn" class="primary" type="button">应用 JSON</button>
+        <button id="copyJsonBtn" type="button">复制当前 JSON</button>
+      </div>
+    </section>
+
+    <section class="tab-panel" data-panel="versions">
+      <h2>SQLite 版本快照</h2>
+      <p id="snapshotInfo" class="hint"></p>
+      <div id="versionList" class="version-list"></div>
+    </section>
+  </aside>
+
+  <section class="views-area">
+    <div class="summary-cards">
+      <div class="metric" id="metricSafety"><b>--</b><span>安全状态</span></div>
+      <div class="metric" id="metricAxle"><b>--</b><span>前后轴荷</span></div>
+      <div class="metric" id="metricCg"><b>--</b><span>货物重心 x/y</span></div>
+      <div class="metric" id="metricFloor"><b>--</b><span>最大点载 / 均载</span></div>
+      <div class="metric" id="metricRehandle"><b>--</b><span>倒箱次数</span></div>
+    </div>
+    <div class="views-grid">
+      <article class="view-card">
+        <header><h2>俯视图</h2><span>拖拽改 x/y，尾门在左，车头在右</span></header>
+        <div id="topView" class="svg-box"></div>
+      </article>
+      <article class="view-card">
+        <header><h2>侧视图</h2><span>拖拽改 x/z；虚线为重心，圆为车轴</span></header>
+        <div id="sideView" class="svg-box"></div>
+      </article>
+      <article class="view-card wide">
+        <header><h2>尾门视图</h2><span>拖拽改 y/z；绿色虚线为门洞</span></header>
+        <div id="tailView" class="svg-box tail"></div>
+      </article>
+    </div>
+  </section>
+
+  <aside class="report-panel">
+    <div class="report-head">
+      <h2>余量和冲突</h2>
+      <div class="filters">
+        <label><input type="checkbox" id="showErrors" checked> 错误</label>
+        <label><input type="checkbox" id="showWarnings" checked> 警告</label>
+        <label><input type="checkbox" id="showInfos" checked> 信息</label>
+      </div>
+    </div>
+    <div id="issueList" class="issue-list"></div>
+    <h3>卸货步骤</h3>
+    <div id="unloadList" class="unload-list"></div>
+  </aside>
+</main>
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
