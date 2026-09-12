@@ -1348,13 +1348,16 @@ def recompute_json(state: Dict[str, Any]) -> Dict[str, Any]:
     report = analyze(normalized)
     boxes = boxes_from(normalized)
     return {
-        "schema": "tour-load-recompute/v1",
+        "schema": "tour-load-recompute/v2",
         "generated_at": now_iso(),
+        "scheme_version": report["lashing"]["scheme_version"],
         "input": normalized,
         "report": report,
         "bounds": {
             b["id"]: {k: b[k] for k in ("x", "y", "z", "dx", "dy", "dz", "orientation", "weight")}
             for b in boxes
         },
+        "anchors": normalized["truck"]["anchors"],
+        "lashing": report["lashing"],
         "loading_sequence": loading_sequence(normalized),
     }

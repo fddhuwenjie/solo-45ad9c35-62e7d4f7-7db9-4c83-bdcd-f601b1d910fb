@@ -147,6 +147,7 @@ def lashing_signature(state: Dict[str, Any], lash: Dict[str, Any]) -> str:
     """Geometry/force signature of one connection (client and server share it)."""
     boxes = {b["id"]: b for b in boxes_from(state)}
     anchors = {a["id"]: a for a in state["truck"]["anchors"]}
+    ranks = {s["id"]: i for i, s in enumerate(state["stops"])}
     parts = [lash["id"]]
     for end in ("from", "to"):
         ep = lash[end]
@@ -159,7 +160,7 @@ def lashing_signature(state: Dict[str, Any], lash: Dict[str, Any]) -> str:
             token += ",g" + str(a.get("group", ""))
         elif ep["kind"] == "case" and ep["id"] in boxes:
             b = boxes[ep["id"]]
-            token += ":B" + _box_canon(b)
+            token += ":B" + _box_canon(b) + f"@r{ranks.get(b['case'].get('stop_id'), -1)}"
             c = b["case"]
             token += ",mu" + _r(c.get("friction", 0.35), 2)
         else:
@@ -339,7 +340,7 @@ def evaluate_lashing(
             "id": lid, "label": label, "locked": locked, "pending": lid in pending,
             "codes": [], "length_m": 0.0, "angle_deg": 0.0,
             "tension_kg": 0.0, "capacity_kg": float(lash["capacity_kg"]),
-            "utilization": 0.0, "ok": True,
+            "utilization": 0.0, "ok": True, "bears_load": False,
             "from": _end_json(ends[0]), "to": _end_json(ends[1]),
         }
         strap_rows[lid] = row
@@ -415,8 +416,14 @@ def evaluate_lashing(
             # Direction the strap pulls the cargo = from case toward anchor.
             case_end = next(e for e in ends if e["kind"] == "case")
             pull = tuple(v / length for v in sub(anchor_end["point"], case_end["point"]))
-            best = max((dot(pull, AXIS_VECTOR[d]) for d in dirs), default=0.0)
-            if dirs and best < math.cos(math.radians(45.0)):
+            cos45 = math.cos(math.radians(45.0))
+            cos60 = math.cos(math.radians(60.0))
+            if abs(pull[2]) > cos45 and "+z" in dirs:
+                best = 1.0  # near-vertical down-strap on a floor D-ring
+            else:
+                horiz = [d for d in dirs if d.endswith("x") or d.endswith("y")]
+                best = max((dot(pull, AXIS_VECTOR[d]) for d in horiz), default=0.0)
+            if dirs and best < cos60:
                 row["codes"].append("ANCHOR_DIRECTION"); row["ok"] = False
                 _add(issues, _sev(locked, "info"), "ANCHOR_DIRECTION",
                      f"{label} 的拉力方向超出锚点 {a.get('label', a['id'])} 可用方向",
@@ -434,6 +441,19 @@ def evaluate_lashing(
             _add(issues, _sev(locked, "warning"), "LASH_OVERLOAD",
                  f"{label} 预紧力 {lash['pretension_kg']:.0f} kg 已超过额定 "
                  f"{lash['capacity_kg']:.0f} kg", lid)
+        # De-duplicate codes (e.g. one diagonal may cross several boxes).
+        seen_codes: set[str] = set()
+        deduped = []
+        for c in row["codes"]:
+            if c not in seen_codes:
+                seen_codes.add(c)
+                deduped.append(c)
+        row["codes"] = deduped
+        # A strap with a hard geometry fault cannot be trusted to carry load.
+        hard_nonbearing = {"LASH_DANGLING", "LASH_LENGTH", "LASH_FACE",
+                           "LASH_THROUGH_BOX", "LASH_ZONE", "ANCHOR_DIRECTION"}
+        if not (hard_nonbearing & set(deduped)) and not (angle >= 80.0):
+            row["bears_load"] = True
 
     # ---- per-case force model (locked straps only) ----
     case_rows: Dict[str, Dict[str, Any]] = {}
@@ -442,9 +462,12 @@ def evaluate_lashing(
         cid = b["id"]
         W = float(b["weight"])
         mu = float(b["case"].get("friction", 0.35))
-        attachments = []  # (lash row, own point, other point, unit e toward anchor, lash)
+        attachments = []  # (strap row, own point, other point, unit e, lash, other)
         for lash, ends, ok in resolved:
             if not ok or not lash["locked"]:
+                continue
+            srow = strap_rows[lash["id"]]
+            if not srow["bears_load"]:
                 continue
             own, other = _attachment(ends, cid)
             if own is None or other is None:
@@ -460,7 +483,7 @@ def evaluate_lashing(
         down_pre = sum(float(l["pretension_kg"]) * max(0.0, -e[2]) for _, _, _, e, l, _ in attachments)
         Ff = mu * (W + down_pre)
         slip_margins: Dict[str, Optional[float]] = {}
-        required_t: Dict[str, float] = {row_id: 0.0 for row_id, *_ in attachments}
+        required_t: Dict[str, float] = {row["id"]: 0.0 for row, *_ in attachments}
         tendency_demand: Dict[str, float] = {}
         for tname, axis in TENDENCIES:
             u = AXIS_VECTOR[axis]
@@ -495,11 +518,12 @@ def evaluate_lashing(
             pivot = [b["x"] + b["dx"] / 2, b["y"] + b["dy"] / 2, b["z"]]
             pivot[0] += u[0] * b["dx"] / 2
             pivot[1] += u[1] * b["dy"] / 2
-            s = cross(u, (0.0, 0.0, 1.0))  # positive scalar moment = restoring
+            s = cross(u, (0.0, 0.0, 1.0))  # pivot axis; positive scalar = restoring
             cg_r = (b["x"] + b["dx"] / 2 - pivot[0], b["y"] + b["dy"] / 2 - pivot[1], z_cg - pivot[2])
-            # scalar [s · (r × F)]; gravity (+z force at inward r) restores,
-            # inertia (+u force at height z) tips.
-            gravity_m = dot(s, cross(cg_r, (0.0, 0.0, W)))
+            # Gravity F=(0,0,-W) with inward r gives positive (restoring);
+            # the braking/turning pseudo-force +W*a_g*u at height gives, after
+            # the sign flip, a positive tipping load.
+            gravity_m = dot(s, cross(cg_r, (0.0, 0.0, -W)))
             inertia_m = -dot(s, cross(cg_r, (W * a_g * u[0], W * a_g * u[1], 0.0)))
             tip_load = max(0.0, inertia_m) + max(0.0, -gravity_m)
             restore = max(0.0, gravity_m) + max(0.0, -inertia_m)
@@ -540,11 +564,14 @@ def evaluate_lashing(
             if m is None:
                 return
             code = kind.upper() + "_MARGIN"
+            # Without a single locked strap the plan is simply unfinished ->
+            # warn.  Once straps are locked and still short, it is a hard error.
+            severity = "error" if attachments else "warning"
             if m < SLIP_REQUIRED_MARGIN - EPS:
-                _add(issues, "error", code,
+                _add(issues, severity, code,
                      f"{b['label']} {name}余量 {m:.2f}（要求 ≥{SLIP_REQUIRED_MARGIN:.2f}）{('·'+tname) if tname else ''}",
                      case_ids=[cid])
-                case_flag(cid, "error", code)
+                case_flag(cid, severity, code)
             elif m < SLIP_WARN_MARGIN - EPS:
                 _add(issues, "warning", code,
                      f"{b['label']} {name}余量偏低 {m:.2f}", case_ids=[cid])
@@ -579,7 +606,7 @@ def evaluate_lashing(
     for a in truck["anchors"]:
         total = 0.0
         for lash, ends, ok in resolved:
-            if not ok or not lash["locked"]:
+            if not ok or not lash["locked"] or not strap_rows[lash["id"]]["bears_load"]:
                 continue
             anchor_end = next((e for e in ends if e and e["kind"] == "anchor"), None)
             if anchor_end and anchor_end["id"] == a["id"]:
@@ -666,15 +693,21 @@ def _leg_state(state: Dict[str, Any], keep_stop_ranks: set[int]) -> Dict[str, An
     return sub
 
 
-def _leg_failures(eval_result: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Error codes produced on a simulated leg (silent evaluation)."""
+def _leg_failures(eval_result: Dict[str, Any], strict: bool = True) -> List[Dict[str, Any]]:
+    """Error codes produced on a simulated leg (silent evaluation).
+
+    ``strict=False`` is used for the full-load departure stage, where unlocked
+    /missing lashing is an unfinished-plan warning rather than a leg failure.
+    """
     failures = []
     for row in eval_result["straps"]:
         hard = [c for c in row["codes"] if c in {
             "LASH_DANGLING", "LASH_LENGTH", "LASH_FACE", "LASH_THROUGH_BOX",
-            "LASH_ZONE", "ANCHOR_DIRECTION", "LASH_OVERLOAD", "LASH_ANGLE"}]
-        # On legs only hard capacity/geometry failures count; draft angle stays
-        # a warning unless extreme (already hard-coded at >=80 deg).
+            "LASH_ZONE", "ANCHOR_DIRECTION", "LASH_OVERLOAD"}]
+        # On legs hard capacity/geometry failures count; the >=80 deg angle
+        # leaves the strap with no horizontal hold, so it fails too.
+        if "LASH_ANGLE" in row["codes"] and row["angle_deg"] >= 80.0:
+            hard.append("LASH_ANGLE")
         for c in hard:
             failures.append({"kind": "lashing", "id": row["id"], "label": row["label"], "code": c})
     for a in eval_result["anchors"]:
@@ -682,15 +715,20 @@ def _leg_failures(eval_result: Dict[str, Any]) -> List[Dict[str, Any]]:
             failures.append({"kind": "anchor", "id": a["id"], "label": a["label"], "code": "ANCHOR_OVERLOAD"})
         if a.get("group_capacity_kg") and a.get("group_load_kg", 0) > a["group_capacity_kg"] + EPS:
             failures.append({"kind": "anchor_group", "id": a["group"], "label": a["group"], "code": "ANCHOR_GROUP"})
-    for r in eval_result["cases"]:
-        for m in r["slip"].values():
-            if m is not None and m < SLIP_REQUIRED_MARGIN - EPS:
-                failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "SLIP_MARGIN"})
-        for m in r["tip"].values():
-            if m is not None and m < SLIP_REQUIRED_MARGIN - EPS:
-                failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "TIP_MARGIN"})
-        if r["lift"] is not None and r["lift"] < SLIP_REQUIRED_MARGIN - EPS:
-            failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "LIFT_MARGIN"})
+    if strict:
+        for r in eval_result["cases"]:
+            secured = bool(r["lashing_ids"])
+            if not secured and r["weight_kg"] >= NO_LASHING_WEIGHT_KG:
+                failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "LASH_MISSING"})
+            if secured:
+                for m in r["slip"].values():
+                    if m is not None and m < SLIP_REQUIRED_MARGIN - EPS:
+                        failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "SLIP_MARGIN"})
+                for m in r["tip"].values():
+                    if m is not None and m < SLIP_REQUIRED_MARGIN - EPS:
+                        failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "TIP_MARGIN"})
+                if r["lift"] is not None and r["lift"] < SLIP_REQUIRED_MARGIN - EPS:
+                    failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "LIFT_MARGIN"})
     # De-duplicate.
     seen, out = set(), []
     for f in failures:
@@ -703,7 +741,8 @@ def _leg_failures(eval_result: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 FAILURE_PRIORITY = ["ANCHOR_OVERLOAD", "ANCHOR_GROUP", "LASH_OVERLOAD", "LASH_THROUGH_BOX",
                     "ANCHOR_DIRECTION", "LASH_FACE", "LASH_ZONE", "LASH_ANGLE",
-                    "SLIP_MARGIN", "TIP_MARGIN", "LIFT_MARGIN", "LASH_LENGTH", "LASH_DANGLING"]
+                    "SLIP_MARGIN", "TIP_MARGIN", "LIFT_MARGIN", "LASH_MISSING",
+                    "LASH_LENGTH", "LASH_DANGLING"]
 
 
 def _suggest(state: Dict[str, Any], leg: Dict[str, Any], failure: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -806,6 +845,7 @@ def station_lashing_report(state: Dict[str, Any]) -> Dict[str, Any]:
     departure = evaluate_lashing(state, departure_issues, case_issues)
     ranks = {s["id"]: i for i, s in enumerate(state["stops"])}
 
+    departure_failures = _leg_failures(departure, strict=False)
     stages: List[Dict[str, Any]] = [{
         "key": "departure", "title": "发车前（满载）", "stop_id": None,
         "remaining_case_ids": [b["id"] for b in boxes_from(state)],
@@ -813,7 +853,8 @@ def station_lashing_report(state: Dict[str, Any]) -> Dict[str, Any]:
         "min_slip_margin": departure["min_slip_margin"],
         "min_tip_margin": departure["min_tip_margin"],
         "min_lift_margin": departure["min_lift_margin"],
-        "failures": [],
+        "failures": departure_failures,
+        "evaluation": departure,
     }]
     first_failure = None
     for rank, stop in enumerate(state["stops"]):
@@ -884,3 +925,19 @@ def station_lashing_report(state: Dict[str, Any]) -> Dict[str, Any]:
         "first_failure": first_failure,
         "release_steps": release_steps,
     }
+
+
+def lashing_version_diff(old_state: Dict[str, Any], new_state: Dict[str, Any]) -> Dict[str, Any]:
+    """Precise connection-level diff used when saving a revision.
+
+    Only connections whose geometry/force signature changed are returned, so
+    adjusting the stop order or moving one box marks exactly the straps that
+    must be re-reviewed.
+    """
+    old, new = norm_state(old_state), norm_state(new_state)
+    old_sigs, new_sigs = scheme_version(old)[1], scheme_version(new)[1]
+    affected = sorted(lid for lid in new_sigs if lid in old_sigs and old_sigs[lid] != new_sigs[lid])
+    added = sorted(lid for lid in new_sigs if lid not in old_sigs)
+    removed = sorted(lid for lid in old_sigs if lid not in new_sigs)
+    return {"affected_lashing_ids": affected, "added": added, "removed": removed,
+            "old_scheme": scheme_version(old)[0], "new_scheme": new_sigs and scheme_version(new)[0]}

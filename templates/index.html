@@ -27,6 +27,7 @@
       <div class="menu" id="exportMenu">
         <button data-export="loading">装车顺序 Markdown</button>
         <button data-export="unloading">各站卸货步骤</button>
+        <button data-export="lashing">系固清单 / 解带步骤</button>
         <button data-export="layers">逐层 SVG</button>
         <button data-export="layers-json">SVG JSON</button>
         <button data-export="recompute">复算 JSON</button>
@@ -43,6 +44,7 @@
     </div>
     <nav class="tabs">
       <button data-tab="arrange" class="active">装载</button>
+      <button data-tab="lashing">系固</button>
       <button data-tab="stops">站点</button>
       <button data-tab="truck">车辆</button>
       <button data-tab="data">载入数据</button>
@@ -58,6 +60,26 @@
           <tbody></tbody>
         </table>
       </div>
+    </section>
+
+    <section class="tab-panel" data-panel="lashing">
+      <h2>系固校核</h2>
+      <div class="scheme-row">
+        <span id="schemeBadge" class="scheme-badge">方案 --</span>
+        <label class="tie-toggle"><input type="checkbox" id="tieMode"> 绑扎模式</label>
+      </div>
+      <p class="hint">绑扎模式下，在任一视图从锚点（○）或箱体边面拖到另一锚点/箱体即建立绑带；也可先选箱体再点锚点。虚线为草稿，绿色为已锁定，紫色为待复核。</p>
+      <div id="lashEditor" class="lash-editor empty">在视图中点选一条绑带进行编辑，或用下方按钮新建。</div>
+      <div class="button-row">
+        <button id="addLashBtn" type="button">新建绑带</button>
+        <button id="lockAllBtn" type="button">锁定全部</button>
+        <button id="unlockAllBtn" type="button">全部解锁</button>
+      </div>
+      <h3>绑带清单 <small id="lashCount" class="hint"></small></h3>
+      <div id="lashList" class="lash-list"></div>
+      <h3>分站校核与增绑建议</h3>
+      <div id="firstFailure" class="first-failure"></div>
+      <div id="legList" class="leg-list"></div>
     </section>
 
     <section class="tab-panel" data-panel="stops">
@@ -83,6 +105,22 @@
       <h3>车轴（x 自尾门起）</h3>
       <div id="axleEditor" class="axle-list"></div>
       <button id="addAxleBtn" type="button">添加车轴</button>
+
+      <h3>制动/转向/颠簸加速度 (g)</h3>
+      <div class="form-grid">
+        <label>前向（急刹）<input id="accelFwd" type="number" step="0.05"></label>
+        <label>后向<input id="accelRear" type="number" step="0.05"></label>
+        <label>横向（转弯）<input id="accelLat" type="number" step="0.05"></label>
+        <label>向上（颠簸）<input id="accelUp" type="number" step="0.05"></label>
+      </div>
+
+      <h3>锚点（地板 / 侧墙 / 前墙）</h3>
+      <p class="hint">地板锚点 z=0；侧墙轨贴 y=0 或车宽；前墙点 x=车长。额定拉力与可用方向决定绑带是否可承载。</p>
+      <div id="anchorEditor" class="anchor-list"></div>
+      <div class="button-row">
+        <button id="addAnchorBtn" type="button">添加锚点</button>
+        <button id="anchorRowsBtn" type="button">按车厢生成双排 D 形环</button>
+      </div>
     </section>
 
     <section class="tab-panel" data-panel="data">
@@ -108,6 +146,7 @@
       <div class="metric" id="metricAxle"><b>--</b><span>前后轴荷</span></div>
       <div class="metric" id="metricCg"><b>--</b><span>货物重心 x/y</span></div>
       <div class="metric" id="metricFloor"><b>--</b><span>最大点载 / 均载</span></div>
+      <div class="metric" id="metricLash"><b>--</b><span>系固余量（防滑/倾覆）</span></div>
       <div class="metric" id="metricRehandle"><b>--</b><span>倒箱次数</span></div>
     </div>
     <div class="views-grid">
@@ -138,6 +177,8 @@
     <div id="issueList" class="issue-list"></div>
     <h3>卸货步骤</h3>
     <div id="unloadList" class="unload-list"></div>
+    <h3>分站解带 <small id="releaseScheme" class="hint"></small></h3>
+    <div id="releaseList" class="release-list"></div>
   </aside>
 </main>
 <div id="toast" class="toast hidden"></div>

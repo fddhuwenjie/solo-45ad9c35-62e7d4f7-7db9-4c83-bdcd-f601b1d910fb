@@ -10,11 +10,13 @@ import io
 
 from outputs import (
     layers_markdown,
+    lashing_markdown,
     loading_markdown,
     render_layer_svgs,
     unloading_markdown,
 )
 from planning import affected_cases, analyze, auto_arrange, norm_state, now_iso, recompute_json, uid
+from lashing import lashing_signature, lashing_version_diff
 from sample_data import BAD_STATE
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -289,8 +291,11 @@ def create_revision(plan_id: str):
     insert_version(db, plan_id, version_no, "draft",
                    body.get("reason", "更换卡车或调整站序后的新版本"), state, affected, report)
     db.commit()
+    lashing_diff = lashing_version_diff(confirmed, state)
     return jsonify({"plan": row_payload(fetch_plan(plan_id)), "report": report,
-                    "affected_case_ids": affected})
+                    "affected_case_ids": affected,
+                    "affected_lashing_ids": lashing_diff["affected_lashing_ids"],
+                    "lashing_diff": lashing_diff})
 
 
 @app.route("/api/plans/<plan_id>/versions")
@@ -329,6 +334,35 @@ def api_analyze():
     return jsonify(analyze(parse_state()))
 
 
+@app.route("/api/lashing/lock", methods=["POST"])
+def lashing_lock():
+    """Lock/unlock straps.  The review signature is stamped server-side from
+    the current geometry so a client cannot fake a re-reviewed connection."""
+    body = request.get_json(silent=True) or {}
+    state = norm_state(body.get("state"))
+    lock = bool(body.get("lock", True))
+    targets = body.get("ids")
+    if isinstance(targets, str):
+        targets = [targets]
+    changed = []
+    for lash in state.get("lashings", []):
+        if targets and lash["id"] not in targets:
+            continue
+        lash["locked"] = lock
+        lash["review_signature"] = lashing_signature(state, lash) if lock else ""
+        changed.append(lash["id"])
+    report = analyze(state)
+    return jsonify({"state": state, "report": report, "changed": changed,
+                    "scheme_version": report["lashing"]["scheme_version"]})
+
+
+@app.route("/api/lashing/suggest", methods=["POST"])
+def lashing_suggest():
+    """Return the first failing connection per leg with an add-strap hint."""
+    state = norm_state((request.get_json(silent=True) or {}).get("state"))
+    return jsonify(analyze(state)["lashing"])
+
+
 @app.route("/api/auto", methods=["POST"])
 def api_auto():
     result = auto_arrange(parse_state())
@@ -344,6 +378,9 @@ def export_response(state: Dict[str, Any], kind: str, plan_name: str = "tour-loa
     if kind == "unloading":
         return Response(unloading_markdown(state, report), mimetype="text/markdown; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{safe_name}-unloading.md"'})
+    if kind == "lashing":
+        return Response(lashing_markdown(state, report), mimetype="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{safe_name}-lashing.md"'})
     if kind == "layers":
         return Response(layers_markdown(state, report), mimetype="text/markdown; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{safe_name}-layers.md"'})
