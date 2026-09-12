@@ -82,8 +82,9 @@ def init_db() -> None:
         report = analyze(state)
         db.execute(
             "INSERT INTO plan_versions (id,plan_id,version_no,status,reason,state_json,affected_case_ids,report_json,created_at) "
-            "VALUES (?,?,1,'draft','内置示例：前轴超载与卸货阻挡',?,?,?,?,?)",
-            (uid(), plan_id, json.dumps(state, ensure_ascii=False), json.dumps([], ensure_ascii=False),
+            "VALUES (?,?,1,'draft',?,?,'[]',?,?)",
+            (uid(), plan_id, "内置示例：前轴超载与卸货阻挡",
+             json.dumps(state, ensure_ascii=False),
              json.dumps(report, ensure_ascii=False), now),
         )
     db.commit()

@@ -737,13 +737,14 @@ def candidate_positions(
             for y in sorted(ys):
                 add(ori, x, y, 0.0, dx, dy, dz)
 
-        # Stack on an existing box, aligned to its support footprint edges.
+        # Stack on one supporting box or a pair of same-height boxes.  Pair
+        # candidates are needed when a heavy case is only safe when spanning two
+        # load-bearing cases (for example drum hardware across two bass cases).
         for lower in boxes:
             z = snap(lower["z"] + lower["dz"])
             if z <= EPS or z + dz > H + EPS:
                 continue
             lx, ly, lx1, ly1 = lower["x"], lower["y"], lower["x"] + lower["dx"], lower["y"] + lower["dy"]
-            # Full support must be possible.
             if dx > lx1 - lx + EPS or dy > ly1 - ly + EPS:
                 continue
             x_choices = {lx, snap(lx1 - dx)}
@@ -755,6 +756,38 @@ def candidate_positions(
             for x in x_choices:
                 for y in y_choices:
                     add(ori, x, y, z, dx, dy, dz)
+
+        top_groups: Dict[float, List[Dict[str, Any]]] = {}
+        for lower in boxes:
+            if lower["z"] > EPS:
+                continue
+            top_groups.setdefault(snap(lower["z"] + lower["dz"]), []).append(lower)
+        for z, lowers in top_groups.items():
+            if z + dz > H + EPS:
+                continue
+            for i, a in enumerate(lowers):
+                for b in lowers[i + 1:]:
+                    ax0, ay0, ax1, ay1 = a["x"], a["y"], a["x"] + a["dx"], a["y"] + a["dy"]
+                    bx0, by0, bx1, by1 = b["x"], b["y"], b["x"] + b["dx"], b["y"] + b["dy"]
+                    ox, oy = overlap_1d(ax0, ax1, bx0, bx1), overlap_1d(ay0, ay1, by0, by1)
+                    gap_x = min(abs(ax1 - bx0), abs(bx1 - ax0))
+                    gap_y = min(abs(ay1 - by0), abs(by1 - ay0))
+                    x_choices, y_choices = set(), set()
+                    if oy >= dy * SUPPORT_RATIO - EPS and gap_x <= SNAP + EPS:
+                        ux0, ux1 = min(ax0, bx0), max(ax1, bx1)
+                        iy0, iy1 = max(ay0, by0), min(ay1, by1)
+                        if ux1 - ux0 + EPS >= dx and iy1 - iy0 + EPS >= dy:
+                            x_choices.update({ux0, snap(ux1 - dx), snap((ux0 + ux1 - dx) / 2)})
+                            y_choices.update({iy0, snap(iy1 - dy)})
+                    elif ox >= dx * SUPPORT_RATIO - EPS and gap_y <= SNAP + EPS:
+                        uy0, uy1 = min(ay0, by0), max(ay1, by1)
+                        ix0, ix1 = max(ax0, bx0), min(ax1, bx1)
+                        if ix1 - ix0 + EPS >= dx and uy1 - uy0 + EPS >= dy:
+                            x_choices.update({ix0, snap(ix1 - dx)})
+                            y_choices.update({uy0, snap(uy1 - dy), snap((uy0 + uy1 - dy) / 2)})
+                    for x in x_choices:
+                        for y in y_choices:
+                            add(ori, x, y, z, dx, dy, dz)
     return list(result.values())
 
 
