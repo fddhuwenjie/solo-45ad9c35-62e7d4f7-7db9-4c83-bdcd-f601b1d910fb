@@ -43,6 +43,20 @@ ORIENTATIONS = {
     "HWL": (2, 1, 0),
 }
 
+# Venue access (落地通道) defaults.  Caster modes carry the threshold a case
+# can roll over; carrying has no practical threshold limit.
+CASTER_MODES = {
+    "carry": {"label": "抬运（无脚轮）", "threshold_mm": 1000.0},
+    "fixed2": {"label": "两定向+两万向脚轮", "threshold_mm": 40.0},
+    "swivel4": {"label": "全万向脚轮", "threshold_mm": 20.0},
+}
+DEFAULT_HANDLING = {
+    "caster_mode": "swivel4",
+    "min_turn_radius": 1.2,
+    "crew": 2,
+    "push_limit_kg": 250.0,
+}
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -50,6 +64,94 @@ def now_iso() -> str:
 
 def uid() -> str:
     return uuid.uuid4().hex[:12]
+
+
+def _num(value: Any, default: float, lo: float = 0.0, hi: Optional[float] = None) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = default
+    v = max(lo, v)
+    return min(hi, v) if hi is not None else v
+
+
+def norm_handling(raw: Any) -> Dict[str, Any]:
+    """Per-case venue-handling parameters (caster mode, turning, crew)."""
+    h = deepcopy(raw) if isinstance(raw, dict) else {}
+    mode = h.get("caster_mode", DEFAULT_HANDLING["caster_mode"])
+    h["caster_mode"] = mode if mode in CASTER_MODES else DEFAULT_HANDLING["caster_mode"]
+    h["min_turn_radius"] = _num(h.get("min_turn_radius"), DEFAULT_HANDLING["min_turn_radius"], 0.0)
+    try:
+        h["crew"] = max(0, int(h.get("crew", DEFAULT_HANDLING["crew"])))
+    except (TypeError, ValueError):
+        h["crew"] = DEFAULT_HANDLING["crew"]
+    h["push_limit_kg"] = _num(h.get("push_limit_kg"), DEFAULT_HANDLING["push_limit_kg"], 0.0)
+    return h
+
+
+def norm_access(raw: Any) -> Dict[str, Any]:
+    """Per-stop venue access: tail lift / ramp, venue plan, path, confirmations."""
+    a = deepcopy(raw) if isinstance(raw, dict) else {}
+    a["kind"] = a.get("kind") if a.get("kind") in ("lift", "ramp") else "lift"
+    a["width"] = _num(a.get("width"), 2.2, 0.2)
+    a["length"] = _num(a.get("length"), 2.0, 0.2)
+    a["capacity_kg"] = _num(a.get("capacity_kg"), 1500.0)
+    a["slope_pct"] = _num(a.get("slope_pct"), 0.0)
+    a["max_slope_pct"] = _num(a.get("max_slope_pct"), 8.0)
+    a["threshold_mm"] = _num(a.get("threshold_mm"), 0.0)
+    a["clear_height"] = _num(a.get("clear_height"), 2.4, 0.5)
+    a["edge_load_ratio"] = _num(a.get("edge_load_ratio"), 0.55, 0.0, 1.0)
+    try:
+        a["parallel_slots"] = max(1, int(a.get("parallel_slots", 1)))
+    except (TypeError, ValueError):
+        a["parallel_slots"] = 1
+    tz = a.get("turn_zone") if isinstance(a.get("turn_zone"), dict) else {}
+    a["turn_zone"] = {
+        "width": _num(tz.get("width"), 3.0, 0.5),
+        "depth": _num(tz.get("depth"), 3.0, 0.5),
+    }
+    venue = a.get("venue") if isinstance(a.get("venue"), dict) else {}
+    dock = venue.get("dock") if isinstance(venue.get("dock"), dict) else {}
+    staging = venue.get("staging") if isinstance(venue.get("staging"), dict) else {}
+    obstacles = []
+    for raw_o in venue.get("obstacles") or []:
+        if not isinstance(raw_o, dict):
+            continue
+        o = {
+            "x": _num(raw_o.get("x"), 0.0),
+            "y": _num(raw_o.get("y"), 0.0),
+            "dx": _num(raw_o.get("dx"), 0.0),
+            "dy": _num(raw_o.get("dy"), 0.0),
+            "label": str(raw_o.get("label", "障碍")),
+        }
+        if o["dx"] > EPS and o["dy"] > EPS:
+            obstacles.append(o)
+    a["venue"] = {
+        "width": _num(venue.get("width"), 14.0, 2.0),
+        "depth": _num(venue.get("depth"), 9.0, 2.0),
+        "dock": {"x": _num(dock.get("x"), 1.0), "y": _num(dock.get("y"), 4.5)},
+        "staging": {
+            "x": _num(staging.get("x"), 10.5),
+            "y": _num(staging.get("y"), 5.5),
+            "dx": _num(staging.get("dx"), 3.0, 0.3),
+            "dy": _num(staging.get("dy"), 3.0, 0.3),
+            "label": str(staging.get("label", "暂存区")),
+        },
+        "obstacles": obstacles,
+    }
+    path = []
+    for raw_p in a.get("path") or []:
+        if not isinstance(raw_p, dict):
+            continue
+        path.append({"x": _num(raw_p.get("x"), 0.0), "y": _num(raw_p.get("y"), 0.0)})
+    a["path"] = path
+    confirmed = {}
+    for cid, rec in (a.get("confirmed_steps") or {}).items():
+        if isinstance(rec, dict) and rec.get("sig"):
+            confirmed[str(cid)] = {"sig": str(rec["sig"]), "at": str(rec.get("at", "")),
+                                   "by": str(rec.get("by", ""))}
+    a["confirmed_steps"] = confirmed
+    return a
 
 
 def norm_state(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -124,6 +226,7 @@ def norm_state(state: Dict[str, Any]) -> Dict[str, Any]:
         stop.setdefault("id", f"stop-{i + 1}")
         stop.setdefault("city", f"城市 {i + 1}")
         stop.setdefault("venue", "")
+        stop["access"] = norm_access(stop.get("access"))
         stop_seen.add(stop["id"])
 
     cases = deepcopy(state.get("cases") or [])
@@ -166,7 +269,19 @@ def norm_state(state: Dict[str, Any]) -> Dict[str, Any]:
             if zone["dx"] > EPS and zone["dy"] > EPS and zone["dz"] > EPS:
                 zones.append(zone)
         case["no_strap_zones"] = zones
+        case["handling"] = norm_handling(case.get("handling"))
         case_seen.add(case["id"])
+
+    # Unloading trips per stop reference cases, so they normalize after cases.
+    for stop in stops:
+        trips = []
+        for raw_trip in stop.get("trips") or []:
+            if not isinstance(raw_trip, dict):
+                continue
+            ids = [cid for cid in (raw_trip.get("case_ids") or []) if cid in case_seen]
+            if ids:
+                trips.append({"case_ids": ids})
+        stop["trips"] = trips
 
     placements = []
     for raw in deepcopy(state.get("placements") or []):
@@ -760,6 +875,17 @@ def analyze(state: Dict[str, Any]) -> Dict[str, Any]:
                 if code not in merged[key]:
                     merged[key].append(code)
 
+    from access import access_report
+    access = access_report(state)
+    for acc_issue in access["issues"]:
+        issues.append(acc_issue)
+    for cid, bucket in access["case_issues"].items():
+        merged = case_issues.setdefault(cid, {"errors": [], "warnings": [], "infos": []})
+        for key in ("errors", "warnings", "infos"):
+            for code in bucket[key]:
+                if code not in merged[key]:
+                    merged[key].append(code)
+
     errors = [i for i in issues if i["severity"] == "error"]
     warnings = [i for i in issues if i["severity"] == "warning"]
     infos = [i for i in issues if i["severity"] == "info"]
@@ -782,6 +908,7 @@ def analyze(state: Dict[str, Any]) -> Dict[str, Any]:
         "layers": layers(boxes),
         "unloading": unload,
         "lashing": lashing_report,
+        "access": access,
         "top_force_kg": load_metrics["top_force_kg"],
         "generated_at": now_iso(),
     }

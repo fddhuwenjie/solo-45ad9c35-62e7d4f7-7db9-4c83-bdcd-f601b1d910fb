@@ -13,10 +13,45 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+def _access(kind, path=None, obstacles=None, **kw):
+    """Venue access registration for a stop (tail lift / ramp + venue plan)."""
+    acc = {
+        "kind": kind,
+        "width": 2.3, "length": 2.2, "capacity_kg": 1500,
+        "slope_pct": 0, "max_slope_pct": 8, "threshold_mm": 10,
+        "clear_height": 2.5, "edge_load_ratio": 0.55, "parallel_slots": 1,
+        "turn_zone": {"width": 3.0, "depth": 3.0},
+        "venue": {
+            "width": 14.0, "depth": 9.0,
+            "dock": {"x": 1.0, "y": 4.5},
+            "staging": {"x": 10.5, "y": 5.5, "dx": 3.0, "dy": 3.0, "label": "暂存区"},
+            "obstacles": obstacles or [],
+        },
+        "path": path or [{"x": 1.0, "y": 4.5}, {"x": 12.0, "y": 4.5}, {"x": 12.0, "y": 7.0}],
+        "confirmed_steps": {},
+    }
+    acc.update(kw)
+    return acc
+
+
 STOPS = [
-    {"id": "ams", "city": "Amsterdam", "venue": "Melkweg"},
-    {"id": "ber", "city": "Berlin", "venue": "Columbiahalle"},
-    {"id": "par", "city": "Paris", "venue": "Le Bataclan"},
+    {"id": "ams", "city": "Amsterdam", "venue": "Melkweg",
+     "trips": [],
+     "access": _access("lift", width=2.4, length=2.2, capacity_kg=1500,
+                       threshold_mm=10, clear_height=2.5,
+                       obstacles=[{"x": 6.5, "y": 1.0, "dx": 0.9, "dy": 0.9, "label": "立柱"}])},
+    {"id": "ber", "city": "Berlin", "venue": "Columbiahalle",
+     "trips": [],
+     "access": _access("lift", width=2.2, length=2.0, capacity_kg=1200,
+                       threshold_mm=20, clear_height=2.4,
+                       turn_zone={"width": 2.8, "depth": 2.8},
+                       obstacles=[{"x": 5.0, "y": 6.4, "dx": 2.4, "dy": 2.0, "label": "储物间"},
+                                  {"x": 9.0, "y": 1.8, "dx": 0.8, "dy": 0.8, "label": "立柱"}])},
+    {"id": "par", "city": "Paris", "venue": "Le Bataclan",
+     "trips": [],
+     "access": _access("ramp", width=2.3, length=3.0, capacity_kg=2000,
+                       slope_pct=4, max_slope_pct=8, threshold_mm=15, clear_height=2.6,
+                       obstacles=[{"x": 4.5, "y": 6.8, "dx": 2.0, "dy": 1.4, "label": "吧台"}])},
 ]
 
 CASES = [
@@ -99,6 +134,23 @@ _CASE_EXTRA = {
 }
 for _c in CASES:
     _c.update(deepcopy(_CASE_EXTRA.get(_c["id"], {})))
+
+# Venue-handling metadata: caster mode, min turning radius, registered crew and
+# per-person push limit.  Paris has a 4% ramp (effort ×1.5), so the heaviest
+# Paris cases register a larger crew.
+_HANDLING_EXTRA = {
+    "VIDEOWALL": {"min_turn_radius": 1.5, "crew": 4},
+    "AMP": {"crew": 3},
+    "FOH-PAR": {"crew": 3},
+}
+for _c in CASES:
+    _c["handling"] = {
+        "caster_mode": "swivel4",
+        "min_turn_radius": 1.2,
+        "crew": 2,
+        "push_limit_kg": 250,
+        **_HANDLING_EXTRA.get(_c["id"], {}),
+    }
 
 TRUCK = {
     "id": "truck-18t",
