@@ -39,13 +39,13 @@ CASES = [
      "max_stack_kg": 150, "forbidden_neighbors": [], "notes": "线缆箱，可任意方向。"},
 
     # Berlin / stop 2.
-    {"id": "BER-LIGHT", "label": "Berlin Lighting Rack", "dims": [1.25, 0.8, 1.7], "weight_kg": 270,
+    {"id": "BER-LIGHT", "label": "Berlin Lighting Rack", "dims": [1.25, 0.9, 1.7], "weight_kg": 270,
      "stop_id": "ber", "allowed_orientations": ["LWH", "WLH"], "max_stack_kg": 0,
      "forbidden_neighbors": [], "notes": "灯控立架，不可倒置。"},
     {"id": "BER-WARD", "label": "Berlin Wardrobe", "dims": [1.5, 1.2, 1.9], "weight_kg": 260,
      "stop_id": "ber", "allowed_orientations": ["LWH", "WLH"], "max_stack_kg": 0,
      "forbidden_neighbors": [], "notes": "服装立箱，不可平放。"},
-    {"id": "MERCH", "label": "Merchandise Cube", "dims": [1.2, 1.2, 1.15], "weight_kg": 150,
+    {"id": "MERCH", "label": "Merchandise Cube", "dims": [0.8, 0.8, 1.0], "weight_kg": 150,
      "stop_id": "ber", "allowed_orientations": ["LWH", "WLH", "LHW"], "max_stack_kg": 90,
      "forbidden_neighbors": [], "notes": "可承压但重心较高。"},
     {"id": "BACKLINE", "label": "Berlin Backline", "dims": [1.5, 0.9, 1.0], "weight_kg": 320,

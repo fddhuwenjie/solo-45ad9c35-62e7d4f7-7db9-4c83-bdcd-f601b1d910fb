@@ -212,11 +212,15 @@ def unloading_markdown(state: Dict[str, Any], report: Dict[str, Any]) -> str:
 
 def layers_markdown(state: Dict[str, Any], report: Dict[str, Any]) -> str:
     state = norm_state(state)
-    cmap = {c["id"]: c for c in state["cases"]}
     boxes = boxes_from(state)
+    layer_case_ids = {
+        round(layer["z"], 6): layer["case_ids"]
+        for layer in report.get("layers") or layers(boxes)
+    }
     lines = [f"# 逐层 SVG 索引：{state['name']}", "", "每个 `<svg>...</svg>` 块可直接保存为 .svg 文件。", ""]
     for layer in render_layer_svgs(state, report):
+        z = round(layer["z"], 6)
         labels = [next((b["label"] for b in boxes if b["id"] == cid), cid)
-                  for cid in layer["z"] and next(l["case_ids"] for l in report["layers"] if abs(l["z"] - layer["z"]) < 1e-6)]
+                  for cid in layer_case_ids.get(z, [])]
         lines += [f"## z = {layer['z']:.2f} m", "", ", ".join(labels), "", layer["svg"], ""]
     return "\n".join(lines) + "\n"
