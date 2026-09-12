@@ -700,12 +700,16 @@ def _leg_failures(eval_result: Dict[str, Any], strict: bool = True) -> List[Dict
     /missing lashing is an unfinished-plan warning rather than a leg failure.
     """
     failures = []
+    # Only LOCKED straps are part of the securing scheme for a leg.  Unlocked
+    # drafts are editing warnings (already in the global issue list) and must
+    # not be counted as securing failures of the leg.
     for row in eval_result["straps"]:
+        if not row.get("locked"):
+            continue
         hard = [c for c in row["codes"] if c in {
             "LASH_DANGLING", "LASH_LENGTH", "LASH_FACE", "LASH_THROUGH_BOX",
             "LASH_ZONE", "ANCHOR_DIRECTION", "LASH_OVERLOAD"}]
-        # On legs hard capacity/geometry failures count; the >=80 deg angle
-        # leaves the strap with no horizontal hold, so it fails too.
+        # The >=80 deg angle leaves the strap with no horizontal hold, so it fails too.
         if "LASH_ANGLE" in row["codes"] and row["angle_deg"] >= 80.0:
             hard.append("LASH_ANGLE")
         for c in hard:
@@ -715,20 +719,25 @@ def _leg_failures(eval_result: Dict[str, Any], strict: bool = True) -> List[Dict
             failures.append({"kind": "anchor", "id": a["id"], "label": a["label"], "code": "ANCHOR_OVERLOAD"})
         if a.get("group_capacity_kg") and a.get("group_load_kg", 0) > a["group_capacity_kg"] + EPS:
             failures.append({"kind": "anchor_group", "id": a["group"], "label": a["group"], "code": "ANCHOR_GROUP"})
-    if strict:
-        for r in eval_result["cases"]:
-            secured = bool(r["lashing_ids"])
-            if not secured and r["weight_kg"] >= NO_LASHING_WEIGHT_KG:
-                failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "LASH_MISSING"})
-            if secured:
-                for m in r["slip"].values():
-                    if m is not None and m < SLIP_REQUIRED_MARGIN - EPS:
-                        failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "SLIP_MARGIN"})
-                for m in r["tip"].values():
-                    if m is not None and m < SLIP_REQUIRED_MARGIN - EPS:
-                        failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "TIP_MARGIN"})
-                if r["lift"] is not None and r["lift"] < SLIP_REQUIRED_MARGIN - EPS:
-                    failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "LIFT_MARGIN"})
+    # Per-case securing failures.  Margin shortfalls on *secured* cases are
+    # hard failures on every stage (including full-load departure): a locked
+    # strap that still leaves slip/tipping/lift margin below 1 is never OK.
+    # ``strict`` only decides whether a heavy case with no locked strap at all
+    # counts as a leg failure (an unfinished plan shows as a warning, not a
+    # failure, before departure).
+    for r in eval_result["cases"]:
+        secured = bool(r["lashing_ids"])
+        if not secured and strict and r["weight_kg"] >= NO_LASHING_WEIGHT_KG:
+            failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "LASH_MISSING"})
+        if secured:
+            for m in r["slip"].values():
+                if m is not None and m < SLIP_REQUIRED_MARGIN - EPS:
+                    failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "SLIP_MARGIN"})
+            for m in r["tip"].values():
+                if m is not None and m < SLIP_REQUIRED_MARGIN - EPS:
+                    failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "TIP_MARGIN"})
+            if r["lift"] is not None and r["lift"] < SLIP_REQUIRED_MARGIN - EPS:
+                failures.append({"kind": "case", "id": r["case_id"], "label": r["label"], "code": "LIFT_MARGIN"})
     # De-duplicate.
     seen, out = set(), []
     for f in failures:
@@ -846,7 +855,7 @@ def station_lashing_report(state: Dict[str, Any]) -> Dict[str, Any]:
     ranks = {s["id"]: i for i, s in enumerate(state["stops"])}
 
     departure_failures = _leg_failures(departure, strict=False)
-    stages: List[Dict[str, Any]] = [{
+    departure_stage = {
         "key": "departure", "title": "发车前（满载）", "stop_id": None,
         "remaining_case_ids": [b["id"] for b in boxes_from(state)],
         "remaining_mass_kg": sum(b["weight"] for b in boxes_from(state)),
@@ -855,8 +864,25 @@ def station_lashing_report(state: Dict[str, Any]) -> Dict[str, Any]:
         "min_lift_margin": departure["min_lift_margin"],
         "failures": departure_failures,
         "evaluation": departure,
-    }]
-    first_failure = None
+    }
+    stages: List[Dict[str, Any]] = [departure_stage]
+
+    def first_failure_for(stage: Dict[str, Any], leg_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        failures = stage.get("failures") or []
+        if not failures:
+            return None
+        ordered = sorted(failures,
+                         key=lambda f: FAILURE_PRIORITY.index(f["code"]) if f["code"] in FAILURE_PRIORITY else 99)
+        f0 = ordered[0]
+        return {
+            "stage_key": stage["key"], "stage_title": stage["title"],
+            "stop_id": stage.get("stop_id"), **f0,
+            "suggestion": _suggest(state, leg_state, f0),
+        }
+
+    # Departure (full load) is the first leg and may carry the first failure.
+    first_failure = first_failure_for(departure_stage, state)
+
     for rank, stop in enumerate(state["stops"]):
         keep = {r for r in range(rank + 1, len(state["stops"]))}
         leg = _leg_state(state, keep)
@@ -883,14 +909,8 @@ def station_lashing_report(state: Dict[str, Any]) -> Dict[str, Any]:
             "evaluation": ev,
         }
         stages.append(stage)
-        if first_failure is None and failures:
-            failures.sort(key=lambda f: FAILURE_PRIORITY.index(f["code"]) if f["code"] in FAILURE_PRIORITY else 99)
-            f0 = failures[0]
-            suggestion = _suggest(state, leg, f0)
-            first_failure = {
-                "stage_key": stage["key"], "stage_title": stage["title"],
-                "stop_id": stop["id"], **f0, "suggestion": suggestion,
-            }
+        if first_failure is None:
+            first_failure = first_failure_for(stage, leg)
 
     # Per-stop release order (high attachment first).
     release_steps = []
