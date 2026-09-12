@@ -20,6 +20,10 @@
   let selectedAnchorId = null;
   let tieMode = false;
   let tie = null; // in-progress strap connection
+  let weigh = {
+    stages: [], sheets: [], stage: 'departure', evaluation: null,
+    selectedCandidate: -1, loading: false,
+  };
 
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => [...document.querySelectorAll(sel)];
@@ -109,6 +113,8 @@
     planId = plan.id;
     state = plan.state;
     selectedId = null; selectedLashId = null; selectedAnchorId = null;
+    weigh = {stages: [], sheets: [], stage: 'departure', evaluation: null,
+             selectedCandidate: -1, loading: false};
     $('#planName').value = state.name || plan.name || '';
     $('#statusPill').textContent = plan.status === 'confirmed' ? '已确认' : '草稿';
     $('#statusPill').className = `pill ${plan.status}`;
@@ -119,6 +125,7 @@
     if (!caseById(selectedId)) selectedId = null;
     render();
     scheduleAnalyze();
+    loadWeighSheets();
   }
 
   async function loadPlans(selectId = null) {
@@ -167,6 +174,7 @@
     renderLashingUI();
     renderViews();
     renderReport();
+    renderWeigh();
   }
 
   function issueClass(caseId) {
@@ -316,6 +324,12 @@
       set('#accelFwd', t.accel.forward); set('#accelRear', t.accel.rearward);
       set('#accelLat', t.accel.lateral); set('#accelUp', t.accel.up);
     }
+    const wcfg = t.weigh || {};
+    set('#weighFuelDensity', wcfg.fuel_density_kg_l ?? 0.84);
+    set('#weighFuelX', wcfg.fuel_tank_x_m ?? Math.round(t.length * 0.15 * 100) / 100);
+    set('#weighCrewKg', wcfg.crew_kg_per_person ?? 80);
+    set('#weighCrewX', wcfg.crew_x_m ?? Math.round(t.length * 0.62 * 100) / 100);
+    set('#weighMiscX', wcfg.misc_x_m ?? Math.round(t.length * 0.5 * 100) / 100);
   }
   function renderAxles() {
     $('#axleEditor').innerHTML = state.truck.axles.map((a, i) => `
@@ -332,7 +346,8 @@
 
   function svgEl(content, w, h) {
     return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
-      <defs><marker id="arrow-${Math.random().toString(36).slice(2)}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker></defs>
+      <defs><marker id="arrow-${Math.random().toString(36).slice(2)}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker>
+      <marker id="arrow-weigh" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"/></marker></defs>
       <rect width="${w}" height="${h}" fill="#fbfdff"/>${content}</svg>`;
   }
 
@@ -460,6 +475,7 @@
       rectNode(b, x0+b.x*s, y0+(t.height-b.z-b.dz)*s, b.dx*s, b.dz*s)).join('');
     html += lashOverlaySide(x0, y0, s, t);
     html += anchorOverlaySide(x0, y0, s, t);
+    html += weighOverlaySide(x0, y0, s, t);
     if (tie) html += tieRubber((p)=>[x0+p[0]*s, y0+(t.height-p[2])*s]);
     $('#sideView').innerHTML = svgEl(html, W, H);
   }
@@ -941,6 +957,7 @@
       });
       planId = data.plan.id; state = data.plan.state; report = data.report;
       await loadPlans(planId);
+      await loadWeighSheets();
       toast(data.plan.latest_version?.reason ? `已保存为 v${data.plan.latest_version.version_no}` : '已保存');
     } catch (err) { toast(err.message, 'error'); }
   }
@@ -1208,6 +1225,16 @@
     });
   });
 
+  [['#weighFuelDensity','fuel_density_kg_l'],['#weighFuelX','fuel_tank_x_m'],
+   ['#weighCrewKg','crew_kg_per_person'],['#weighCrewX','crew_x_m'],
+   ['#weighMiscX','misc_x_m']].forEach(([sel, key]) => {
+    $(sel).addEventListener('change', () => {
+      state.truck.weigh = state.truck.weigh || {};
+      state.truck.weigh[key] = Math.max(0, +$(sel).value);
+      mutate(state);
+    });
+  });
+
   $('#applyJsonBtn').onclick = () => {
     try {
       const parsed = JSON.parse($('#jsonInput').value);
@@ -1235,12 +1262,330 @@
     $$('.tab-panel').forEach(p => p.classList.toggle('active', p.dataset.panel === tab));
     if (tab === 'data') $('#jsonInput').value = JSON.stringify(state, null, 2);
     if (tab === 'versions') loadVersions();
+    if (tab === 'weigh') { loadWeighSheets(); }
   });
+
+  // ---------------- weigh tab events ----------------
+  $('#weighStage').addEventListener('change', e => {
+    weigh.stage = e.target.value;
+    weigh.evaluation = wSheet(weigh.stage)?.evaluation || null;
+    weigh.selectedCandidate = -1;
+    renderWeighForm(); renderWeighResult(); renderWeighSheetList(); renderViews();
+  });
+  $('#wApply').onclick = () => evaluateWeigh(false);
+  $('#wSave').onclick = () => evaluateWeigh(true);
+  $('#wUsePred').onclick = () => fillPredicted();
+  ['#wGross', '#wTol', '#wScaleMax', '#wFuel', '#wCrew', '#wMisc'].forEach(sel =>
+    $(sel).addEventListener('change', () => { weigh.evaluation = null; renderWeighResult(); }));
+  $('#wAxles').addEventListener('change', () => { weigh.evaluation = null; renderWeighResult(); });
   $('#issueList').addEventListener('click', e => {
     const item = e.target.closest('[data-case]');
     if (item?.dataset.case) { selectedId = item.dataset.case; renderCases(); renderViews(); }
   });
   ['showErrors','showWarnings','showInfos'].forEach(id => $('#'+id).addEventListener('change', renderIssueList));
+
+  // ===================== weighbridge reconciliation =====================
+  function wSheet(stage) { return weigh.sheets.find(s => s.stage === stage) || null; }
+
+  async function loadWeighSheets() {
+    if (!planId) return;
+    try {
+      const data = await api(`/api/plans/${encodeURIComponent(planId)}/weigh/sheets`);
+      weigh.stages = data.stages || [];
+      weigh.sheets = data.sheets || [];
+      if (!weigh.stages.includes(weigh.stage)) weigh.stage = weigh.stages[0] || 'departure';
+      renderWeighStageSelect();
+      renderWeighForm();
+      renderWeighResult();
+      renderWeighSheetList();
+      renderWeighMetric();
+    } catch (_) { /* weigh tab is optional while editing */ }
+  }
+
+  function renderWeighMetric() {
+    const el = $('#metricWeigh');
+    if (!el) return;
+    const frozen = weigh.sheets.filter(s => s.status === 'frozen').length;
+    const stale = weigh.sheets.filter(s => s.stale).length;
+    const bad = weigh.sheets.filter(s => s.evaluation?.verdict === 'out_of_tolerance' && s.status !== 'frozen').length;
+    const gaps = weigh.sheets.filter(s => s.evaluation?.verdict === 'evidence_gap').length;
+    let cls = 'good', txt = `${frozen}/${weigh.stages.length} 已冻结`;
+    if (stale) { cls = 'warn'; txt = `${stale} 张待复核`; }
+    if (bad) { cls = 'bad'; txt = `${bad} 张超差`; }
+    else if (gaps) { cls = 'warn'; txt = `${gaps} 张证据缺口`; }
+    if (!weigh.sheets.length) { cls = ''; txt = '未录入'; }
+    el.className = `metric ${cls}`;
+    el.innerHTML = `<b>${esc(txt)}</b><span>称重核对</span>`;
+  }
+
+  function renderWeighStageSelect() {
+    const sel = $('#weighStage');
+    const titles = {departure: '发车前（满载）'};
+    state.stops.forEach(s => titles[`after-${s.id}`] = `${s.city} 卸货后`);
+    sel.innerHTML = weigh.stages.map(st =>
+      `<option value="${esc(st)}">${esc(titles[st] || st)}</option>`).join('');
+    sel.value = weigh.stage;
+  }
+
+  function axleInputs() {
+    return state.truck.axles.map((a, i) =>
+      `<label>${esc(a.name)}轴实测 kg<input type="number" step="1" data-w-axle="${i}"></label>`).join('');
+  }
+
+  function renderWeighForm() {
+    $('#wAxles').innerHTML = axleInputs();
+    const sheet = wSheet(weigh.stage);
+    const r = sheet?.readings || {};
+    const set = (id, v) => { const el = $(id); if (el && document.activeElement !== el) el.value = v ?? ''; };
+    set('#wTime', r.weighed_at ? toLocalInput(r.weighed_at) : '');
+    set('#wTol', r.tolerance_kg ?? 20);
+    set('#wScaleMax', r.scale_max_kg ?? '');
+    set('#wGross', r.gross_kg ?? '');
+    set('#wFuel', r.fuel_l ?? 100);
+    set('#wCrew', r.crew_count ?? 2);
+    set('#wMisc', r.misc_kg ?? 0);
+    set('#wCrewNames', r.crew_names ?? '');
+    set('#wNotes', r.notes ?? '');
+    $$('#wAxles input').forEach((inp, i) => { if (document.activeElement !== inp) inp.value = r.axle_kg?.[i] ?? ''; });
+    const pill = $('#weighStatus');
+    if (!sheet) { pill.textContent = '未录入'; pill.className = 'pill'; }
+    else {
+      const v = sheet.evaluation?.verdict || 'draft';
+      pill.textContent = sheet.status === 'frozen'
+        ? (sheet.stale ? '已冻结 · 待复核' : '已冻结')
+        : `草稿 · ${({within_tolerance: '核对通过', evidence_gap: '证据缺口', out_of_tolerance: '超差', incomplete: '信息不全'})[v] || v}`;
+      pill.className = `pill ${sheet.status === 'frozen' && sheet.stale ? 'stale' : sheet.status}`;
+    }
+  }
+
+  function toLocalInput(iso) {
+    const dt = new Date(iso.length === 16 ? iso.replace(' ', 'T') : iso);
+    if (isNaN(dt)) return iso;
+    const p = n => String(n).padStart(2, '0');
+    return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}T${p(dt.getHours())}:${p(dt.getMinutes())}`;
+  }
+
+  function collectReadings() {
+    return {
+      weighed_at: $('#wTime').value || '',
+      tolerance_kg: numOrNull($('#wTol').value),
+      scale_max_kg: numOrNull($('#wScaleMax').value),
+      gross_kg: numOrNull($('#wGross').value),
+      axle_kg: $$('#wAxles input').map(i => numOrNull(i.value)),
+      fuel_l: numOrNull($('#wFuel').value) ?? 0,
+      crew_count: numOrNull($('#wCrew').value) ?? 0,
+      misc_kg: numOrNull($('#wMisc').value) ?? 0,
+      crew_names: $('#wCrewNames').value,
+      notes: $('#wNotes').value,
+    };
+  }
+  function numOrNull(v) { if (v === '' || v == null) return null; const n = Number(v); return Number.isFinite(n) ? n : null; }
+
+  async function evaluateWeigh(persist) {
+    const readings = collectReadings();
+    const url = persist
+      ? `/api/plans/${encodeURIComponent(planId)}/weigh/${encodeURIComponent(weigh.stage)}`
+      : `/api/plans/${encodeURIComponent(planId)}/weigh/${encodeURIComponent(weigh.stage)}/evaluate`;
+    try {
+      weigh.loading = true;
+      const data = await api(url, {method: persist ? 'PUT' : 'POST',
+        body: JSON.stringify({readings})});
+      weigh.evaluation = persist ? data.evaluation : data;
+      if (persist) await loadWeighSheets();
+      weigh.selectedCandidate = -1;
+      renderWeighResult();
+      renderViews();
+      if (persist) toast('称重单已暂存为草稿');
+    } catch (err) { toast(err.message, 'error'); }
+    finally { weigh.loading = false; }
+  }
+
+  async function fillPredicted() {
+    // Compute the theoretical readings with the current declared non-equipment load.
+    const readings = collectReadings();
+    try {
+      const ev = await api(`/api/plans/${encodeURIComponent(planId)}/weigh/${encodeURIComponent(weigh.stage)}/evaluate`,
+        {method: 'POST', body: JSON.stringify({readings})});
+      weigh.evaluation = ev;
+      const p = ev.predicted;
+      if (p) {
+        $('#wGross').value = Math.round(p.gross_kg);
+        $$('#wAxles input').forEach((inp, i) => inp.value = Math.round(p.axles[i].total_kg));
+        if (!$('#wScaleMax').value) $('#wScaleMax').value = state.truck.gvw_limit_kg || '';
+      }
+      renderWeighResult();
+      toast('已按当站应留箱体与当前油量/人数填入理论值');
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  function fmtKg(v) { return v == null ? '—' : `${Math.round(v)}`; }
+  function residRow(c) {
+    const d = c.residual_kg, ok = c.within_tolerance;
+    return `<tr><td>${esc(c.label)}</td><td>${fmtKg(c.measured_kg)}</td><td>${fmtKg(c.predicted_kg)}</td>
+      <td class="${ok ? 'resid-ok' : 'resid-bad'}">${d >= 0 ? '+' : ''}${Math.round(d)}</td>
+      <td class="hint">±${Math.round(c.tolerance_kg)}</td></tr>`;
+  }
+
+  function renderWeighResult() {
+    const el = $('#weighResult');
+    const ev = weigh.evaluation;
+    if (!ev) { el.innerHTML = '<p class="hint">填写读数后点“核对读数”，系统将重算理论区间并核对。</p>'; return; }
+    let html = '';
+    const p = ev.predicted;
+    if (p) {
+      html += `<div class="weigh-pred"><b>${esc(ev.stage_title)} · 理论值</b>
+        <span class="hint">应留 ${p.onboard_case_ids.length} 箱 · 货物 ${Math.round(p.cargo_mass_kg)} kg ·
+        非器材 ${Math.round(p.extra_mass_kg)} kg · 自重 ${Math.round(p.tare_kg)} kg</span>
+        <table><thead><tr><th></th><th>实测录入</th><th>理论</th><th>残差</th><th>公差</th></tr></thead>
+        <tbody>${(ev.components || []).map(residRow).join('') ||
+          '<tr><td colspan="5" class="hint">读数不全，暂无法比较</td></tr>'}</tbody></table>`;
+      if (ev.deltas?.length) {
+        html += `<table><thead><tr><th>与上一程之差</th><th>实测变化</th><th>计划卸下</th><th>残差</th><th>公差</th></tr></thead>
+          <tbody>${ev.deltas.map(residRow).join('')}</tbody></table>`;
+      }
+      if (p.extra_rows?.length) {
+        html += `<div class="hint">非器材：${p.extra_rows.map(r =>
+          `${esc(r.label)} ${Math.round(r.mass_kg)}kg（${r.axle_kg.map(x=>Math.round(x)).join('/')}）`).join('；')}</div>`;
+      }
+      html += '</div>';
+    }
+    if (ev.gaps?.length) {
+      html += `<div class="weigh-gap bad"><b>证据缺口（${ev.gaps.length}）— 仅列证据，不做病因判断</b>
+        ${ev.gaps.map(g => `<div>· ${esc(g.message)} <code>${esc(g.code)}</code></div>`).join('')}</div>`;
+    }
+    if (ev.verdict === 'within_tolerance') {
+      html += '<div class="weigh-gap" style="border-left-color:var(--success);background:#ecfdf5;color:#065f46"><b>总重守恒、轴荷与卸载差均在秤误差范围内，核对通过。</b></div>';
+    }
+    if (ev.candidates?.length) {
+      html += `<h3>最少异常项候选（点选在侧视图高亮对各轴贡献）</h3>`;
+      html += ev.candidates.map((c, i) => {
+        const sel = weigh.selectedCandidate === i ? ' selected' : '';
+        const kinds = {missing: '漏装/错卸', extra: '错卸留车', weight: '重量偏差', shift: '纵向错位'};
+        const evs = c.events.map(e =>
+          `<span class="k-${e.kind}">${esc(kinds[e.kind] || e.kind)}：${esc(caseById(e.case_id)?.label || e.case_id)}`
+          + `${e.kind === 'weight' ? ` ${e.weight_delta_kg >= 0 ? '+' : ''}${Math.round(e.weight_delta_kg)}kg` : ''}`
+          + `${e.kind === 'shift' ? ` ${e.dx_m >= 0 ? '+' : ''}${e.dx_m}m` : ''}</span>`).join('');
+        const ax = c.axle_contributions?.[0]?.axle_delta_kg || [];
+        return `<div class="cand-card${sel}" data-cand="${i}">
+          <div class="cand-head"><span>${c.event_count} 项异常</span>
+          <span class="hint">超公差残余 ${Math.round(c.excess_kg)} kg</span></div>
+          <div class="cand-events">${evs}</div>
+          <div class="cand-axles">对各轴贡献：${ax.map((x, j) =>
+            `<span class="${Math.abs(x) > 0.5 ? (x > 0 ? 'resid-bad' : 'resid-ok') : ''}">${esc(state.truck.axles[j]?.name || '轴'+j)} ${x >= 0 ? '+' : ''}${Math.round(x)}</span>`).join(' · ')}</div>
+          <div class="cand-meta">解释后残差：${c.residual_after.map(r =>
+            `${esc(r.label)} ${r.residual_kg >= 0 ? '+' : ''}${r.residual_kg}${r.within_tolerance ? '' : '⚠'}`).join(' · ')}</div>
+        </div>`;
+      }).join('');
+      const chosen = ev.candidates[weigh.selectedCandidate];
+      if (chosen) {
+        html += `<div class="freeze-row">
+          <input id="wReviewer" placeholder="现场复核人姓名" value="">
+          <button id="wFreeze" class="success">确认现场复核结果并冻结</button>
+          <span class="hint">将按所选 ${chosen.event_count} 项异常派生实际装载新版本并重跑轴荷/系固；原计划不覆盖。</span>
+        </div>`;
+      }
+    } else if (ev.verdict === 'out_of_tolerance') {
+      html += '<div class="weigh-gap bad"><b>存在超差，但未找到可解释的最少异常项组合；请核对秤单或扩大现场检查范围。</b></div>';
+    }
+    el.innerHTML = html;
+    el.querySelectorAll('.cand-card').forEach(card => card.onclick = () => {
+      weigh.selectedCandidate = Number(card.dataset.cand);
+      renderWeighResult(); renderViews();
+    });
+    const fz = $('#wFreeze');
+    if (fz) fz.onclick = () => freezeWeigh(ev.candidates[weigh.selectedCandidate]);
+  }
+
+  async function freezeWeigh(cand) {
+    const reviewer = $('#wReviewer').value.trim();
+    if (!reviewer) return toast('请填写现场复核人姓名', 'warn');
+    if (!cand) return;
+    const readings = collectReadings();
+    const events = cand.events.map(e => ({
+      kind: e.kind, case_id: e.case_id, present_prev: e.present_prev !== false,
+      dx_m: e.dx_m || 0, weight_delta_kg: e.weight_delta_kg || 0,
+    }));
+    try {
+      const data = await api(`/api/plans/${encodeURIComponent(planId)}/weigh/${encodeURIComponent(weigh.stage)}/freeze`,
+        {method: 'POST', body: JSON.stringify({reviewer, readings, events})});
+      weigh.evaluation = data.evaluation;
+      weigh.selectedCandidate = -1;
+      state = data.plan.state;
+      render(); renderReport(); renderViews();
+      await loadWeighSheets(); loadVersions();
+      toast(data.derived_version_no
+        ? `称重单已冻结，并派生实际装载 v${data.derived_version_no}（轴荷与系固已重跑）`
+        : '称重单已冻结');
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  function renderWeighSheetList() {
+    const el = $('#weighSheetList');
+    if (!el) return;
+    if (!weigh.sheets.length) { el.innerHTML = '<p class="hint">尚无称重单。</p>'; return; }
+    const titles = {departure: '发车前（满载）'};
+    state.stops.forEach(s => titles[`after-${s.id}`] = `${s.city} 卸货后`);
+    el.innerHTML = weigh.stages.map(st => {
+      const s = wSheet(st);
+      if (!s) return '';
+      const v = s.evaluation?.verdict || '';
+      const vtxt = {within_tolerance: '核对通过', evidence_gap: '证据缺口',
+                    out_of_tolerance: '超差', incomplete: '信息不全'}[v] || '草稿';
+      return `<div class="sheet-item ${s.status} ${s.stage === weigh.stage ? 'selected' : ''}" data-sheet="${esc(st)}">
+        <div><b>${esc(titles[st] || st)}</b>
+          <small>${esc(s.readings.weighed_at || '无时刻')} · ${esc(s.reviewer || '未复核')}
+          ${s.derived_version_no ? ` · 派生 v${s.derived_version_no}` : ''}</small></div>
+        <div class="sheet-verdict ${v}">${s.status === 'frozen' ? (s.stale ? '待复核' : '🔒 ') : ''}${vtxt}</div>
+      </div>`;
+    }).join('');
+    el.querySelectorAll('[data-sheet]').forEach(node => node.onclick = () => {
+      weigh.stage = node.dataset.sheet;
+      weigh.evaluation = wSheet(weigh.stage)?.evaluation || null;
+      weigh.selectedCandidate = -1;
+      $('#weighStage').value = weigh.stage;
+      renderWeighForm(); renderWeighResult(); renderWeighSheetList(); renderViews();
+    });
+  }
+
+  function selectedWeighContribs() {
+    const ev = weigh.evaluation;
+    if (!ev || weigh.selectedCandidate < 0) return null;
+    const cand = ev.candidates?.[weigh.selectedCandidate];
+    return cand ? cand.axle_contributions : null;
+  }
+
+  function weighOverlaySide(x0, y0, s, t) {
+    const contribs = selectedWeighContribs();
+    if (!contribs) return '';
+    let html = '';
+    const colors = {missing: '#dc2626', extra: '#ea580c', weight: '#ca8a04', shift: '#7c3aed'};
+    const axlesY = y0 + t.height * s + 22;
+    contribs.forEach((c, idx) => {
+      const color = colors[c.kind] || '#7c3aed';
+      const cx = x0 + (c.center_x_m + (c.dx_m || 0)) * s;
+      // Dashed highlight over the involved case (or its plan box for a shift).
+      html += `<rect x="${x0 + c.x_m * s - 2}" y="${y0 + 2}" width="${Math.max(6, c.dx_m_box * s + 4)}"
+        height="${t.height * s - 4}" rx="4" fill="none" stroke="${color}" stroke-width="3"
+        stroke-dasharray="7 4" pointer-events="none"/>`;
+      const net = c.axle_delta_kg.reduce((a, b) => a + b, 0);
+      html += `<text class="weigh-contrib-label" x="${cx - 30}" y="${y0 + 14 + idx * 13}"
+        fill="${color}" pointer-events="none">${esc(caseById(c.case_id)?.label || c.case_id)}
+        ${c.kind === 'shift' ? `${c.dx_m >= 0 ? '+' : ''}${c.dx_m}m` : ''}
+        ${c.kind === 'weight' ? `${c.weight_delta_kg >= 0 ? '+' : ''}${Math.round(c.weight_delta_kg)}kg` : ''}
+        Σ${net >= 0 ? '+' : ''}${Math.round(net)}</text>`;
+      c.axle_delta_kg.forEach((d, ai) => {
+        if (Math.abs(d) < 0.5) return;
+        const ax = x0 + t.axles[ai].position * s;
+        const yStart = y0 + (c.kind === 'extra' ? 18 : t.height * s - 8);
+        html += `<line x1="${cx}" y1="${yStart}" x2="${ax}" y2="${axlesY - 10}"
+          stroke="${color}" stroke-width="2.4" opacity=".9" pointer-events="none"/>
+          <circle cx="${ax}" cy="${axlesY - 6}" r="4" fill="${color}"/>
+          <text x="${(cx + ax) / 2 - 16}" y="${(yStart + axlesY) / 2}" font-size="11"
+          font-weight="700" fill="${color}" pointer-events="none">${d >= 0 ? '+' : ''}${Math.round(d)} kg → ${esc(t.axles[ai].name)}轴</text>`;
+      });
+    });
+    return html;
+  }
 
   loadPlans().catch(err => toast(err.message, 'error'));
 })();

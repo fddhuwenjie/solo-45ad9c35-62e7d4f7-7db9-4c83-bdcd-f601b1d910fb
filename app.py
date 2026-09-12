@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from flask import Flask, Response, g, jsonify, render_template, request, send_file
 import io
@@ -17,6 +17,13 @@ from outputs import (
 )
 from planning import affected_cases, analyze, auto_arrange, norm_state, now_iso, recompute_json, uid
 from lashing import lashing_signature, lashing_version_diff
+from weighing import (
+    apply_resolution,
+    evaluate_sheet,
+    predicted_readings,
+    sheet_signature,
+    stage_sequence,
+)
 from sample_data import BAD_STATE
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -72,6 +79,28 @@ def init_db() -> None:
         """
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_versions_plan ON plan_versions(plan_id, version_no)")
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS weigh_sheets (
+            id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            readings_json TEXT NOT NULL,
+            eval_json TEXT,
+            signature TEXT NOT NULL DEFAULT '',
+            derived_version_no INTEGER,
+            resolution_json TEXT NOT NULL DEFAULT '[]',
+            reviewer TEXT NOT NULL DEFAULT '',
+            frozen_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(plan_id, stage),
+            FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
+        )
+        """
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_weigh_plan ON weigh_sheets(plan_id, stage)")
     existing = db.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
     if not existing:
         state = norm_state(BAD_STATE)
@@ -142,6 +171,101 @@ def insert_version(
         (uid(), plan_id, version_no, status, reason, json.dumps(state, ensure_ascii=False),
          json.dumps(affected or [], ensure_ascii=False), json.dumps(report, ensure_ascii=False), now_iso()),
     )
+
+
+# ----------------------------- weigh sheets -----------------------------
+
+def fetch_sheet(plan_id: str, stage: str) -> sqlite3.Row:
+    row = get_db().execute(
+        "SELECT * FROM weigh_sheets WHERE plan_id=? AND stage=?", (plan_id, stage)
+    ).fetchone()
+    if row is None:
+        raise KeyError("称重单不存在")
+    return row
+
+
+def _chronology_rows(plan_id: str, stage: str) -> list[dict]:
+    """Earlier, already recorded tickets used for the TIME_ORDER check."""
+    rows = get_db().execute(
+        "SELECT stage, readings_json FROM weigh_sheets WHERE plan_id=? ORDER BY updated_at",
+        (plan_id,),
+    ).fetchall()
+    state = json.loads(fetch_plan(plan_id)["current_state"])
+    ranks = {s: i for i, s in enumerate(stage_sequence(state))}
+    out = []
+    for r in rows:
+        if r["stage"] == stage or r["stage"] not in ranks:
+            continue
+        readings = json.loads(r["readings_json"])
+        out.append({"stage": r["stage"], "weighed_at": readings.get("weighed_at", ""),
+                    "label": _stage_label(state, r["stage"])})
+    return out
+
+
+def _stage_label(state: Dict[str, Any], stage: str) -> str:
+    if stage == "departure":
+        return "发车前（满载）"
+    sid = stage[len("after-"):] if stage.startswith("after-") else ""
+    stop = next((s for s in state.get("stops", []) if s["id"] == sid), None)
+    return f"{stop['city']} 卸货后" if stop else stage
+
+
+def _previous_sheet(plan_id: str, stage: str) -> Optional[sqlite3.Row]:
+    """The chronologically adjacent recorded ticket (any status)."""
+    state = json.loads(fetch_plan(plan_id)["current_state"])
+    seq = stage_sequence(state)
+    if stage not in seq:
+        return None
+    rank = seq.index(stage)
+    candidates = [s for s in seq[:rank]]
+    rows = get_db().execute(
+        "SELECT * FROM weigh_sheets WHERE plan_id=?", (plan_id,)
+    ).fetchall()
+    by_stage = {r["stage"]: r for r in rows}
+    for prev_stage in reversed(candidates):
+        if prev_stage in by_stage:
+            return by_stage[prev_stage]
+    return None
+
+
+def _sheet_payload(row: sqlite3.Row, state: Dict[str, Any]) -> Dict[str, Any]:
+    sig_now = ""
+    try:
+        sig_now = sheet_signature(state, row["stage"])
+    except ValueError:
+        sig_now = ""
+    stale = row["status"] == "frozen" and bool(row["signature"]) and sig_now != row["signature"]
+    return {
+        "id": row["id"],
+        "stage": row["stage"],
+        "stage_title": _stage_label(state, row["stage"]),
+        "status": "stale" if stale else row["status"],
+        "readings": json.loads(row["readings_json"]),
+        "evaluation": json.loads(row["eval_json"]) if row["eval_json"] else None,
+        "signature": row["signature"],
+        "signature_current": sig_now,
+        "stale": stale,
+        "derived_version_no": row["derived_version_no"],
+        "resolution": json.loads(row["resolution_json"] or "[]"),
+        "reviewer": row["reviewer"],
+        "frozen_at": row["frozen_at"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def evaluate_for_plan(plan_id: str, stage: str, readings: Dict[str, Any]) -> Dict[str, Any]:
+    state = json.loads(fetch_plan(plan_id)["current_state"])
+    chronology = _chronology_rows(plan_id, stage)
+    prev_row = _previous_sheet(plan_id, stage)
+    prev_sheet = None
+    if prev_row is not None:
+        prev_sheet = {"stage": prev_row["stage"], "status": prev_row["status"],
+                      "readings": json.loads(prev_row["readings_json"]),
+                      "weighed_at": json.loads(prev_row["readings_json"]).get("weighed_at", ""),
+                      "label": _stage_label(state, prev_row["stage"])}
+    return evaluate_sheet(state, stage, readings, chronology=chronology,
+                          prev_sheet=prev_sheet)
 
 
 def save_state_to_plan(plan_id: str, state: Dict[str, Any], reason: str = "手工编辑") -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -327,6 +451,180 @@ def version_detail(plan_id: str, version_no: int):
         "report": json.loads(row["report_json"]) if row["report_json"] else None,
         "state": json.loads(row["state_json"]), "created_at": row["created_at"],
     })
+
+
+@app.route("/api/plans/<plan_id>/weigh/sheets")
+def weigh_sheets(plan_id: str):
+    """All tickets for a plan with fresh staleness flags (computed on read)."""
+    state = json.loads(fetch_plan(plan_id)["current_state"])
+    rows = get_db().execute(
+        "SELECT * FROM weigh_sheets WHERE plan_id=? ORDER BY created_at", (plan_id,)
+    ).fetchall()
+    sheets = [_sheet_payload(r, state) for r in rows]
+    return jsonify({
+        "stages": stage_sequence(state),
+        "stage_titles": {s: _stage_label(state, s) for s in stage_sequence(state)},
+        "sheets": sheets,
+    })
+
+
+@app.route("/api/plans/<plan_id>/weigh/<stage>/evaluate", methods=["POST"])
+def weigh_evaluate(plan_id: str, stage: str):
+    """Dry-run reconciliation for the edited ticket; nothing is persisted."""
+    fetch_plan(plan_id)
+    body = request.get_json(silent=True) or {}
+    readings = body.get("readings") or {}
+    if body.get("state"):
+        state = norm_state(body["state"])
+        seq = stage_sequence(state)
+        if stage not in seq:
+            raise ValueError("当前站序中不存在该称重阶段")
+        prev_sheet = None
+        if body.get("prev_sheet"):
+            prev_sheet = body["prev_sheet"]
+        chronology = body.get("chronology") or []
+        result = evaluate_sheet(state, stage, readings,
+                                chronology=chronology, prev_sheet=prev_sheet)
+        result["predicted"] = predicted_readings(state, stage, readings)
+        return jsonify(result)
+    result = evaluate_for_plan(plan_id, stage, readings)
+    return jsonify(result)
+
+
+@app.route("/api/plans/<plan_id>/weigh/<stage>", methods=["PUT", "POST"])
+def weigh_save(plan_id: str, stage: str):
+    """Create/update a draft (or overwrite a stale frozen ticket after recheck)."""
+    fetch_plan(plan_id)
+    body = request.get_json(silent=True) or {}
+    readings = body.get("readings") or {}
+    result = evaluate_for_plan(plan_id, stage, readings)
+    db = get_db()
+    now = now_iso()
+    existing = db.execute(
+        "SELECT * FROM weigh_sheets WHERE plan_id=? AND stage=?", (plan_id, stage)
+    ).fetchone()
+    if existing is not None and existing["status"] == "frozen":
+        state = json.loads(fetch_plan(plan_id)["current_state"])
+        if existing["signature"] and not body.get("force") and \
+                existing["signature"] == sheet_signature(state, stage):
+            return jsonify({"error": "该称重单已冻结；计划相关内容修改后才允许复核重录，或使用 force=true。",
+                            "sheet": _sheet_payload(existing, state)}), 409
+    if existing is None:
+        sheet_id = uid()
+        db.execute(
+            "INSERT INTO weigh_sheets (id,plan_id,stage,status,readings_json,eval_json,"
+            "signature,derived_version_no,resolution_json,reviewer,frozen_at,"
+            "created_at,updated_at) VALUES (?,?,?,'draft',?,?,'',NULL,'[]','',NULL,?,?)",
+            (sheet_id, plan_id, stage,
+             json.dumps(readings, ensure_ascii=False),
+             json.dumps(result, ensure_ascii=False), now, now),
+        )
+    else:
+        db.execute(
+            "UPDATE weigh_sheets SET status='draft', readings_json=?, eval_json=?, "
+            "signature='', reviewer='', frozen_at=NULL, derived_version_no=NULL, "
+            "resolution_json='[]', updated_at=? WHERE id=?",
+            (json.dumps(readings, ensure_ascii=False),
+             json.dumps(result, ensure_ascii=False), now, existing["id"]),
+        )
+    db.commit()
+    row = fetch_sheet(plan_id, stage)
+    state = json.loads(fetch_plan(plan_id)["current_state"])
+    return jsonify({"sheet": _sheet_payload(row, state), "evaluation": result})
+
+
+@app.route("/api/plans/<plan_id>/weigh/<stage>/freeze", methods=["POST"])
+def weigh_freeze(plan_id: str, stage: str):
+    """Confirm the on-site recheck and freeze the ticket.
+
+    With ``events`` the findings are applied to derive a new actual-loading
+    version (re-running axle and lashing checks); the confirmed/plan snapshot is
+    never overwritten.  A ticket may also be frozen as-is when it reconciles.
+    """
+    fetch_plan(plan_id)
+    body = request.get_json(silent=True) or {}
+    row = get_db().execute(
+        "SELECT * FROM weigh_sheets WHERE plan_id=? AND stage=?", (plan_id, stage)
+    ).fetchone()
+    if row is not None and row["status"] == "frozen" and not body.get("force"):
+        raise ValueError("称重单已冻结")
+    plan_row = fetch_plan(plan_id)
+    state = json.loads(plan_row["current_state"])
+    readings = body.get("readings") or (
+        json.loads(row["readings_json"]) if row is not None else None)
+    if not readings:
+        raise ValueError("缺少称重读数")
+    events = body.get("events") or []
+    reviewer = str(body.get("reviewer", "")).strip()
+    if not reviewer:
+        raise ValueError("请填写现场复核人姓名")
+    result = evaluate_for_plan(plan_id, stage, readings)
+    if result["gaps"]:
+        raise ValueError("存在证据缺口，先校正称重单后再冻结："
+                         + "；".join(g["message"] for g in result["gaps"][:3]))
+    if events and result["verdict"] != "out_of_tolerance":
+        # Findings only accompany an actually reconciled discrepancy.
+        events = []
+
+    derived_no = None
+    next_state = state
+    if events:
+        next_state = apply_resolution(state, stage, events)
+        next_state = norm_state(next_state)
+        next_report = analyze(next_state)
+        db = get_db()
+        version_no = db.execute(
+            "SELECT COALESCE(MAX(version_no),0)+1 FROM plan_versions WHERE plan_id=?",
+            (plan_id,),
+        ).fetchone()[0]
+        confirmed = json.loads(plan_row["confirmed_state"]) if plan_row["confirmed_state"] else state
+        affected = affected_cases(confirmed, next_state, next_report)
+        reason = f"称重复核（{_stage_label(state, stage)}）派生实际装载版本"
+        insert_version(db, plan_id, version_no, "actual", reason, next_state,
+                       affected, next_report)
+        db.execute("UPDATE plans SET current_state=?, status='draft', updated_at=? WHERE id=?",
+                   (json.dumps(next_state, ensure_ascii=False), now_iso(), plan_id))
+        derived_no = version_no
+
+    signature = sheet_signature(next_state, stage)
+    db = get_db()
+    now = now_iso()
+    if row is None:
+        sheet_id = uid()
+        db.execute(
+            "INSERT INTO weigh_sheets (id,plan_id,stage,status,readings_json,eval_json,"
+            "signature,derived_version_no,resolution_json,reviewer,frozen_at,"
+            "created_at,updated_at) VALUES (?,?,?,'frozen',?,?,?,?,'[]',?,?,?,?)",
+            (sheet_id, plan_id, stage,
+             json.dumps(readings, ensure_ascii=False),
+             json.dumps(result, ensure_ascii=False), signature,
+             derived_no, reviewer, now, now, now),
+        )
+    else:
+        db.execute(
+            "UPDATE weigh_sheets SET status='frozen', readings_json=?, eval_json=?, signature=?, "
+            "resolution_json=?, reviewer=?, frozen_at=?, derived_version_no=?, updated_at=? "
+            "WHERE id=?",
+            (json.dumps(readings, ensure_ascii=False),
+             json.dumps(result, ensure_ascii=False), signature,
+             json.dumps(events, ensure_ascii=False), reviewer, now, derived_no, now, row["id"]),
+        )
+    db.commit()
+    saved = fetch_sheet(plan_id, stage)
+    return jsonify({"sheet": _sheet_payload(saved, next_state),
+                    "evaluation": result,
+                    "derived_version_no": derived_no,
+                    "plan": row_payload(fetch_plan(plan_id))})
+
+
+@app.route("/api/plans/<plan_id>/weigh/<stage>", methods=["DELETE"])
+def weigh_delete(plan_id: str, stage: str):
+    row = fetch_sheet(plan_id, stage)
+    if row["status"] == "frozen" and not request.args.get("force"):
+        raise ValueError("已冻结的称重单不能删除，只能复核重录")
+    get_db().execute("DELETE FROM weigh_sheets WHERE id=?", (row["id"],))
+    get_db().commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/analyze", methods=["POST"])

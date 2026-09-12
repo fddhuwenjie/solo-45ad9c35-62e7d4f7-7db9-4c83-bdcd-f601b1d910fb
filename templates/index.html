@@ -45,6 +45,7 @@
     <nav class="tabs">
       <button data-tab="arrange" class="active">装载</button>
       <button data-tab="lashing">系固</button>
+      <button data-tab="weigh">称重</button>
       <button data-tab="stops">站点</button>
       <button data-tab="truck">车辆</button>
       <button data-tab="data">载入数据</button>
@@ -82,6 +83,38 @@
       <div id="legList" class="leg-list"></div>
     </section>
 
+    <section class="tab-panel" data-panel="weigh">
+      <h2>分站称重核对</h2>
+      <p class="hint">每次发车或卸货后录入地磅单。系统按当站应留车箱体重算理论总重与轴荷，
+        核对总重守恒、轴荷差与前后两程卸载差；证据缺口（时刻倒序、读数超量程、轴荷与总重不相容）只列证据不猜病因，
+        超差时按最少异常项给出漏装 / 错卸 / 重量偏差 / 纵向错位候选。</p>
+      <div class="weigh-stage-row">
+        <select id="weighStage"></select>
+        <span id="weighStatus" class="pill">--</span>
+      </div>
+      <h3>称重单</h3>
+      <div class="form-grid weigh-form">
+        <label>称重时刻<input type="datetime-local" id="wTime" step="60"></label>
+        <label>秤误差 ±kg<input type="number" id="wTol" step="1" value="20"></label>
+        <label>秤量程 kg<input type="number" id="wScaleMax" step="100" placeholder="留空=总重上限"></label>
+        <label>实测总重 kg<input type="number" id="wGross" step="1"></label>
+        <div id="wAxles" class="w-axles"></div>
+        <label>燃油 L<input type="number" id="wFuel" step="1" value="100"></label>
+        <label>随车人数<input type="number" id="wCrew" step="1" value="2"></label>
+        <label>其他非器材 kg<input type="number" id="wMisc" step="1" value="0"></label>
+        <label class="wide">随车人员<input type="text" id="wCrewNames" placeholder="姓名 / 岗位，逗号分隔"></label>
+        <label class="wide">备注<input type="text" id="wNotes" placeholder="现场情况、天气、加油等"></label>
+      </div>
+      <div class="button-row">
+        <button id="wApply" type="button">核对读数</button>
+        <button id="wSave" type="button">暂存草稿</button>
+        <button id="wUsePred" type="button">用理论值填入</button>
+      </div>
+      <div id="weighResult" class="weigh-result"></div>
+      <h3>已录称重单</h3>
+      <div id="weighSheetList" class="weigh-sheet-list"></div>
+    </section>
+
     <section class="tab-panel" data-panel="stops">
       <h2>城市顺序</h2>
       <p class="hint">靠前的站点先卸货；顺序改变后再保存，会与已确认快照对比并列出受影响箱体。</p>
@@ -105,6 +138,15 @@
       <h3>车轴（x 自尾门起）</h3>
       <div id="axleEditor" class="axle-list"></div>
       <button id="addAxleBtn" type="button">添加车轴</button>
+
+      <h3>非器材载荷（称重核对用）</h3>
+      <div class="form-grid">
+        <label>燃油密度 kg/L<input id="weighFuelDensity" type="number" step="0.01"></label>
+        <label>油箱位置 x m<input id="weighFuelX" type="number" step="0.05"></label>
+        <label>人均体重 kg<input id="weighCrewKg" type="number" step="1"></label>
+        <label>乘员位置 x m<input id="weighCrewX" type="number" step="0.05"></label>
+        <label>其他载荷位置 x m<input id="weighMiscX" type="number" step="0.05"></label>
+      </div>
 
       <h3>制动/转向/颠簸加速度 (g)</h3>
       <div class="form-grid">
@@ -148,6 +190,7 @@
       <div class="metric" id="metricFloor"><b>--</b><span>最大点载 / 均载</span></div>
       <div class="metric" id="metricLash"><b>--</b><span>系固余量（防滑/倾覆）</span></div>
       <div class="metric" id="metricRehandle"><b>--</b><span>倒箱次数</span></div>
+      <div class="metric" id="metricWeigh"><b>--</b><span>称重核对</span></div>
     </div>
     <div class="views-grid">
       <article class="view-card">
