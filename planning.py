@@ -21,6 +21,19 @@ SNAP = 0.05
 SUPPORT_RATIO = 0.98
 CELL = 0.1
 
+# Lashing (cargo securing) defaults.  Accelerations are in g, following the
+# common EN 12195-style simplified model used by the teaching tool.
+DEFAULT_ACCEL = {"forward": 0.8, "rearward": 0.5, "lateral": 0.5, "up": 0.3, "down": 1.0}
+DEFAULT_FRICTION = 0.35
+DEFAULT_STRAP_CAPACITY_KG = 1000.0
+DEFAULT_PRETENSION_KG = 200.0
+ALL_LASH_FACES = ["-x", "+x", "-y", "+y"]
+DIRECTIONS_3D = ["-x", "+x", "-y", "+y", "-z", "+z"]
+SLIP_REQUIRED_MARGIN = 1.0
+SLIP_WARN_MARGIN = 1.15
+MAX_LASH_ANGLE_DEG = 60.0
+NO_LASHING_WEIGHT_KG = 100.0
+
 ORIENTATIONS = {
     "LWH": (0, 1, 2),
     "WLH": (1, 0, 2),
@@ -69,6 +82,42 @@ def norm_state(state: Dict[str, Any]) -> Dict[str, Any]:
         axle.setdefault("capacity_kg", 0.0)
     truck["axles"] = sorted(axles, key=lambda a: float(a["position"]))
 
+    accel = deepcopy(truck.get("accel") or {})
+    for key, default in DEFAULT_ACCEL.items():
+        accel.setdefault(key, default)
+        accel[key] = float(accel[key])
+    truck["accel"] = accel
+
+    anchors = []
+    for i, raw in enumerate(deepcopy(truck.get("anchors") or [])):
+        a = dict(raw)
+        a.setdefault("id", f"anchor-{i + 1}")
+        a.setdefault("label", a["id"])
+        a.setdefault("surface", "floor")
+        a.setdefault("x", 0.0)
+        a.setdefault("y", float(truck["width"]) / 2)
+        a.setdefault("z", 0.0)
+        a.setdefault("capacity_kg", 1000.0)
+        a.setdefault("group", "")
+        a.setdefault("group_capacity_kg", 0.0)
+        allowed = a.setdefault("directions", ["+x", "-x", "+y", "-y", "+z"])
+        a["directions"] = [d for d in allowed if d in DIRECTIONS_3D]
+        try:
+            a["x"] = float(a["x"]); a["y"] = float(a["y"]); a["z"] = float(a["z"])
+            a["capacity_kg"] = float(a["capacity_kg"])
+        except (TypeError, ValueError):
+            continue
+        anchors.append(a)
+    truck["anchors"] = anchors
+
+    strap_defaults = deepcopy(truck.get("strap_defaults") or {})
+    strap_defaults.setdefault("capacity_kg", DEFAULT_STRAP_CAPACITY_KG)
+    strap_defaults.setdefault("pretension_kg", DEFAULT_PRETENSION_KG)
+    truck["strap_defaults"] = {
+        "capacity_kg": float(strap_defaults["capacity_kg"]),
+        "pretension_kg": float(strap_defaults["pretension_kg"]),
+    }
+
     stops = deepcopy(state.get("stops") or [])
     stop_seen = set()
     for i, stop in enumerate(stops):
@@ -91,6 +140,32 @@ def norm_state(state: Dict[str, Any]) -> Dict[str, Any]:
         case.setdefault("max_stack_kg", 0.0)
         case.setdefault("forbidden_neighbors", [])
         case.setdefault("notes", "")
+        case.setdefault("friction", DEFAULT_FRICTION)
+        try:
+            case["friction"] = min(1.0, max(0.0, float(case["friction"])))
+        except (TypeError, ValueError):
+            case["friction"] = DEFAULT_FRICTION
+        faces = case.setdefault("lash_faces", list(ALL_LASH_FACES))
+        case["lash_faces"] = [f for f in faces if f in ALL_LASH_FACES] or list(ALL_LASH_FACES)
+        zones = []
+        for raw_zone in deepcopy(case.get("no_strap_zones") or []):
+            if not isinstance(raw_zone, dict):
+                continue
+            try:
+                zone = {
+                    "x": float(raw_zone.get("x", 0.0)),
+                    "y": float(raw_zone.get("y", 0.0)),
+                    "z": float(raw_zone.get("z", 0.0)),
+                    "dx": float(raw_zone.get("dx", 0.0)),
+                    "dy": float(raw_zone.get("dy", 0.0)),
+                    "dz": float(raw_zone.get("dz", 0.0)),
+                    "label": str(raw_zone.get("label", "禁压区")),
+                }
+            except (TypeError, ValueError):
+                continue
+            if zone["dx"] > EPS and zone["dy"] > EPS and zone["dz"] > EPS:
+                zones.append(zone)
+        case["no_strap_zones"] = zones
         case_seen.add(case["id"])
 
     placements = []
@@ -105,12 +180,60 @@ def norm_state(state: Dict[str, Any]) -> Dict[str, Any]:
         item.setdefault("locked", False)
         placements.append(item)
 
+    anchor_seen = {a["id"] for a in truck["anchors"]}
+    lashings = []
+    for i, raw in enumerate(deepcopy(state.get("lashings") or [])):
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        item.setdefault("id", f"lash-{i + 1}")
+        item.setdefault("label", item["id"])
+        item.setdefault("from", {})
+        item.setdefault("to", {})
+        item.setdefault("pretension_kg", truck["strap_defaults"]["pretension_kg"])
+        item.setdefault("capacity_kg", truck["strap_defaults"]["capacity_kg"])
+        item.setdefault("locked", False)
+        item.setdefault("review_signature", "")
+        try:
+            item["pretension_kg"] = max(0.0, float(item["pretension_kg"]))
+            item["capacity_kg"] = max(0.0, float(item["capacity_kg"]))
+        except (TypeError, ValueError):
+            continue
+        for end in ("from", "to"):
+            ep = item[end] if isinstance(item[end], dict) else {}
+            ep.setdefault("kind", "anchor")
+            ep.setdefault("id", "")
+            ep.setdefault("face", "")
+            ep.setdefault("u", 0.5)
+            ep.setdefault("v", 0.5)
+            try:
+                ep["u"] = min(1.0, max(0.0, float(ep["u"])))
+                ep["v"] = min(1.0, max(0.0, float(ep["v"])))
+            except (TypeError, ValueError):
+                ep["u"], ep["v"] = 0.5, 0.5
+            item[end] = ep
+        kinds = {item["from"]["kind"], item["to"]["kind"]}
+        if kinds - {"anchor", "case"}:
+            continue
+        # Drop dangling ends.
+        valid = True
+        for ep in (item["from"], item["to"]):
+            if ep["kind"] == "anchor" and ep["id"] not in anchor_seen:
+                valid = False
+            if ep["kind"] == "case" and ep["id"] not in case_seen:
+                valid = False
+        if not valid:
+            continue
+        item["locked"] = bool(item["locked"])
+        lashings.append(item)
+
     return {
         "name": state.get("name", "未命名方案"),
         "truck": truck,
         "stops": stops,
         "cases": cases,
         "placements": placements,
+        "lashings": lashings,
     }
 
 
@@ -626,6 +749,17 @@ def analyze(state: Dict[str, Any]) -> Dict[str, Any]:
               f"横向重心偏移中心线 {cg['y'] - half:+.2f} m")
     unload = unload_simulation(state, boxes, issues, case_issues)
 
+    from lashing import station_lashing_report
+    lashing_report = station_lashing_report(state)
+    for lash_issue in lashing_report["issues"]:
+        issues.append(lash_issue)
+    for cid, bucket in lashing_report["case_issues"].items():
+        merged = case_issues.setdefault(cid, {"errors": [], "warnings": [], "infos": []})
+        for key in ("errors", "warnings", "infos"):
+            for code in bucket[key]:
+                if code not in merged[key]:
+                    merged[key].append(code)
+
     errors = [i for i in issues if i["severity"] == "error"]
     warnings = [i for i in issues if i["severity"] == "warning"]
     infos = [i for i in issues if i["severity"] == "info"]
@@ -647,6 +781,7 @@ def analyze(state: Dict[str, Any]) -> Dict[str, Any]:
         "axle_loads": axle,
         "layers": layers(boxes),
         "unloading": unload,
+        "lashing": lashing_report,
         "top_force_kg": load_metrics["top_force_kg"],
         "generated_at": now_iso(),
     }
@@ -1054,9 +1189,21 @@ def auto_arrange(state: Dict[str, Any], include_locked: bool = True) -> Dict[str
              "orientation": b["orientation"], "locked": b.get("locked", False)}
             for b in built_boxes
         ]
+        # Re-packing moves every case: old strap geometry cannot be trusted, so
+        # every connection is unlocked and sent back for review.
+        for lash in out_state.get("lashings", []):
+            lash["locked"] = False
+            lash["review_signature"] = ""
         order = {c["id"]: i for i, c in enumerate(all_cases)}
         out_state["placements"].sort(key=lambda p: order[p["case_id"]])
         out_report = analyze(out_state)
+        if out_state.get("lashings"):
+            out_report["issues"].append({
+                "severity": "warning", "code": "LASHING_RESET",
+                "message": "自动重排后所有绑带已解除锁定并需要按新箱位重新复核。",
+                "case_ids": [], "lashing_id": "", "anchor_id": "",
+            })
+            out_report["warning_count"] = sum(1 for i in out_report["issues"] if i["severity"] == "warning")
         if failures:
             out_report["issues"].append({
                 "severity": "warning", "code": "AUTO_PLACEMENT_FAILED",
@@ -1166,7 +1313,8 @@ def affected_cases(old_state: Dict[str, Any], new_state: Dict[str, Any], report:
     new_truck = new["truck"]
     truck_changed = any(old_truck.get(k) != new_truck.get(k) for k in
                         ("id", "length", "width", "height", "axles", "door",
-                         "floor_limit_kg_m2", "floor_point_limit_kg", "gvw_limit_kg"))
+                         "floor_limit_kg_m2", "floor_point_limit_kg", "gvw_limit_kg",
+                         "anchors", "accel"))
     old_stop_rank = {s["id"]: i for i, s in enumerate(old["stops"])}
     new_stop_rank = {s["id"]: i for i, s in enumerate(new["stops"])}
     affected = set()
@@ -1176,6 +1324,14 @@ def affected_cases(old_state: Dict[str, Any], new_state: Dict[str, Any], report:
         if item["code"] == "AXLE_LOAD" and truck_changed:
             affected.update(c["id"] for c in new["cases"])
         affected.update(item.get("case_ids", []))
+    # Pending (geometry-changed) connections re-flag their endpoint cases.
+    new_box_ids = {p["case_id"] for p in new["placements"]}
+    for lid in report.get("lashing", {}).get("pending_ids", []):
+        lash = next((l for l in new.get("lashings", []) if l["id"] == lid), None)
+        if lash:
+            for ep in (lash["from"], lash["to"]):
+                if ep["kind"] == "case" and ep["id"] in new_box_ids:
+                    affected.add(ep["id"])
     for c in new["cases"]:
         cid = c["id"]
         old_rank = old_stop_rank.get(c.get("stop_id"))
