@@ -45,7 +45,7 @@ CASES = [
     {"id": "BER-WARD", "label": "Berlin Wardrobe", "dims": [1.5, 1.2, 1.9], "weight_kg": 260,
      "stop_id": "ber", "allowed_orientations": ["LWH", "WLH"], "max_stack_kg": 0,
      "forbidden_neighbors": [], "notes": "服装立箱，不可平放。"},
-    {"id": "MERCH", "label": "Merchandise Cube", "dims": [0.8, 0.8, 1.0], "weight_kg": 150,
+    {"id": "MERCH", "label": "Merchandise Cube", "dims": [1.2, 1.2, 1.15], "weight_kg": 150,
      "stop_id": "ber", "allowed_orientations": ["LWH", "WLH", "LHW"], "max_stack_kg": 90,
      "forbidden_neighbors": [], "notes": "可承压但重心较高。"},
     {"id": "BACKLINE", "label": "Berlin Backline", "dims": [1.5, 0.9, 1.0], "weight_kg": 320,

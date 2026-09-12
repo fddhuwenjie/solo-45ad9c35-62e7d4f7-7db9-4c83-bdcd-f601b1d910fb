@@ -975,25 +975,26 @@ def lane_pack(
     return result
 
 SAMPLE_SAFE_PLACEMENTS = {
-    # Floor: top strip y=0.05..1.25.
-    "BER-WARD": (0.00, 0.05, 0.00, "LWH"),
-    "FOH-L": (1.50, 0.05, 0.00, "LWH"),
-    "FOH-R": (2.75, 0.05, 0.00, "LWH"),
-    "BER-LIGHT": (4.00, 0.05, 0.00, "LWH"),
-    "BASS-B": (5.25, 0.05, 0.00, "WLH"),
-    # Floor: bottom strip y=1.30..2.55.
-    "AMP": (0.00, 1.75, 0.00, "LWH"),
-    "VIDEOWALL": (1.20, 1.55, 0.00, "LHW"),
-    "BACKLINE": (3.30, 1.65, 0.00, "LWH"),
-    "FOH-PAR": (4.80, 1.30, 0.00, "LWH"),
-    # Supported upper cases.
-    "CON-CAT": (0.20, 1.80, 1.10, "LWH"),
-    "DRUM": (1.50, 1.55, 1.25, "LHW"),
-    "BASS-A": (2.90, 1.55, 1.25, "WLH"),
-    "MERCH": (0.00, 1.75, 1.10, "LWH"),
-    "CON-MON": (3.45, 1.65, 1.00, "LWH"),
-    "SPARE": (5.00, 1.50, 0.95, "LWH"),
+    # Fixed floor supports.
+    "VIDEOWALL": (0.00, 0.05, 0.00, "LHW"),
+    "BACKLINE": (2.10, 0.05, 0.00, "LWH"),
+    "BASS-A": (3.60, 0.05, 0.00, "WLH"),
+    "BASS-B": (4.80, 0.05, 0.00, "WLH"),
+    # Remaining floor cases.
+    "AMP": (3.60, 1.30, 0.00, "WLH"),
+    "BER-WARD": (0.00, 1.30, 0.00, "WLH"),
+    "BER-LIGHT": (1.20, 1.30, 0.00, "WLH"),
+    "FOH-PAR": (2.10, 1.50, 0.00, "LWH"),
+    "FOH-L": (4.40, 1.25, 0.00, "LWH"),
+    # Full-support upper cases.
+    "FOH-R": (2.15, 0.05, 1.00, "LWH"),
+    "DRUM": (3.60, 0.05, 0.95, "WLH"),
+    "CON-MON": (0.45, 0.10, 1.25, "LHW"),
+    "CON-CAT": (0.60, 0.15, 2.15, "LWH"),
+    "MERCH": (2.25, 0.10, 1.00, "LWH"),
+    "SPARE": (3.30, 0.25, 1.00, "LWH"),
 }
+
 
 
 def builtin_safe_sample_arrangement(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1015,18 +1016,6 @@ def builtin_safe_sample_arrangement(state: Dict[str, Any]) -> Optional[Dict[str,
     ]
     candidate = deepcopy(state)
     candidate["placements"] = placements
-    # Keep the educational 15-case payload complete.  The verified arrangement
-    # uses the narrow merchandise cube form and reserves enough front axle
-    # capacity; the deliberately bad initial plan is still unchanged.
-    for case in candidate["cases"]:
-        if case["id"] == "MERCH":
-            case["dims"] = [0.8, 0.8, 1.0]
-            case["allowed_orientations"] = ["LWH", "WLH"]
-    candidate["truck"] = deepcopy(candidate["truck"])
-    candidate["truck"]["axles"] = deepcopy(candidate["truck"]["axles"])
-    for axle in candidate["truck"]["axles"]:
-        if "前" in str(axle.get("name")):
-            axle["capacity_kg"] = max(float(axle.get("capacity_kg", 0.0)), 4300.0)
     report = analyze(candidate)
     return None if report["error_count"] else {"state": candidate, "report": report}
 
