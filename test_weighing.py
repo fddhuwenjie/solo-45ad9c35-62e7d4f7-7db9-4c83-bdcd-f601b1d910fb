@@ -324,6 +324,70 @@ def test_signature_scoping_only_associated_stations() -> None:
     print("OK signatures invalidate only associated station tickets")
 
 
+def test_fuel_change_is_handled_symmetrically_in_unload_delta() -> None:
+    """Defect 1: fuel 300 L -> 100 L, each ticket hits its own theory.
+
+    The front-to-back unload delta strips the declared non-equipment load on
+    BOTH the measured and predicted sides; the old code subtracted the change
+    once (with the wrong sign on gross), reporting a phantom ±168 kg residual
+    and fabricating anomaly candidates.
+    """
+    state = norm_state(BAD_STATE)
+    p0 = predicted_readings(state, "departure", {"fuel_l": 300, "crew_count": 2})
+    dep_read = {
+        "gross_kg": round(p0["gross_kg"]),
+        "axle_kg": [round(a["total_kg"]) for a in p0["axles"]],
+        "tolerance_kg": 20, "fuel_l": 300, "crew_count": 2,
+        "weighed_at": "2026-09-01T08:00",
+    }
+    prev = {"stage": "departure", "status": "frozen", "readings": dep_read,
+            "weighed_at": "2026-09-01T08:00"}
+    rank = 1
+    ranks = {s["id"]: i for i, s in enumerate(state["stops"])}
+    actual = deepcopy(state)
+    actual["placements"] = [
+        p for p in actual["placements"]
+        if ranks[next(c for c in actual["cases"] if c["id"] == p["case_id"])["stop_id"]] >= rank
+    ]
+    p1 = predicted_readings(actual, "after-ams", {"fuel_l": 100, "crew_count": 2})
+    ams_read = {
+        "gross_kg": round(p1["gross_kg"]),
+        "axle_kg": [round(a["total_kg"]) for a in p1["axles"]],
+        "tolerance_kg": 20, "fuel_l": 100, "crew_count": 2,
+        "weighed_at": "2026-09-02T10:00",
+    }
+    ev = evaluate_sheet(state, "after-ams", ams_read, chronology=[prev], prev_sheet=prev)
+    assert ev["verdict"] == "within_tolerance", ev["verdict"]
+    for d in ev["deltas"]:
+        assert d["within_tolerance"], d
+        assert abs(d["residual_kg"]) < 1.0, d
+    assert ev["candidates"] == []
+    # Equipment-only shed equals the planned Amsterdam cargo mass.
+    from planning import boxes_from
+    gross_delta = next(d for d in ev["deltas"] if d["key"] == "delta_gross")
+    planned = sum(b["weight"] for b in boxes_from(state) if b["case"]["stop_id"] == "ams")
+    assert abs(gross_delta["measured_kg"] - planned) < 1.0
+    print("OK fuel change 300->100 L yields zero unload-delta residual")
+
+
+def test_real_unload_anomaly_still_detected_after_delta_fix() -> None:
+    """A wrongly unloaded Paris box must still fail the delta, not be hidden."""
+    state = norm_state(BAD_STATE)
+    dep_pred = predicted_readings(state, "departure", {"fuel_l": 300, "crew_count": 2})
+    prev = {"stage": "departure", "status": "frozen",
+            "readings": readings_from(dep_pred, fuel=300), "weighed_at": "2026-09-01T08:00"}
+    ams_pred = actual_stage_pred(state, "after-ams", remove={"AMP"}, fuel=100)
+    r = evaluate_sheet(state, "after-ams",
+                       readings_from(ams_pred, "2026-09-02T10:00", fuel=100),
+                       chronology=[prev], prev_sheet=prev)
+    assert r["verdict"] == "out_of_tolerance"
+    assert (r["candidates"][0]["events"][0]["kind"],
+            r["candidates"][0]["events"][0]["case_id"]) == ("missing", "AMP")
+    delta_bad = [d for d in r["deltas"] if not d["within_tolerance"]]
+    assert delta_bad, "the unload delta must expose the wrongly unloaded box"
+    print("OK genuine unload anomaly is still flagged after symmetric delta fix")
+
+
 if __name__ == "__main__":
     test_stage_onboard_sets()
     test_departure_within_tolerance()
@@ -336,6 +400,8 @@ if __name__ == "__main__":
     test_evidence_gaps_only()
     test_time_order_gap()
     test_contradictory_evidence_gives_no_false_positive()
+    test_fuel_change_is_handled_symmetrically_in_unload_delta()
+    test_real_unload_anomaly_still_detected_after_delta_fix()
     test_apply_resolution_preserves_plan_and_unlocks_moved_straps()
     test_apply_extra_event_moves_box_to_next_stop()
     test_signature_scoping_only_associated_stations()

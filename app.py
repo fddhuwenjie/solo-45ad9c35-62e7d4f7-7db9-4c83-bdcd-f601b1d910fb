@@ -594,11 +594,11 @@ def weigh_freeze(plan_id: str, stage: str):
         db.execute(
             "INSERT INTO weigh_sheets (id,plan_id,stage,status,readings_json,eval_json,"
             "signature,derived_version_no,resolution_json,reviewer,frozen_at,"
-            "created_at,updated_at) VALUES (?,?,?,'frozen',?,?,?,?,'[]',?,?,?,?)",
+            "created_at,updated_at) VALUES (?,?,?,'frozen',?,?,?,?,?,?,?,?,?)",
             (sheet_id, plan_id, stage,
              json.dumps(readings, ensure_ascii=False),
              json.dumps(result, ensure_ascii=False), signature,
-             derived_no, reviewer, now, now, now),
+             derived_no, json.dumps(events, ensure_ascii=False), reviewer, now, now, now),
         )
     else:
         db.execute(

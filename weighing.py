@@ -406,30 +406,46 @@ def delta_components(state: Dict[str, Any], stage: str,
         return []
     prev_read = prev_sheet.get("readings") or {}
     prev_norm = norm_readings(prev_read, len(state["truck"]["axles"]))
+    n_axles = len(cur_pred["axles"])
     out: List[Dict[str, Any]] = []
-    if cur_norm.get("gross_kg") is not None and prev_norm.get("gross_kg") is not None:
-        measured_shed = prev_norm["gross_kg"] - cur_norm["gross_kg"]
-        predicted_shed = prev_pred["gross_kg"] - cur_pred["gross_kg"]
-        # Non-equipment load may change between tickets; the declared change is
-        # known and removed so the delta compares equipment mass only.
-        declared_extra_change = cur_pred["extra_mass_kg"] - prev_pred["extra_mass_kg"]
-        measured_shed -= declared_extra_change
-        out.append({"key": "delta_gross", "label": "总重卸载量",
-                    "measured": measured_shed, "predicted": predicted_shed,
-                    "residual": measured_shed - predicted_shed,
-                    "tolerance": tol * 2})
-    for i, axle in enumerate(cur_pred["axles"]):
-        m_cur = (cur_norm.get("axle_kg") or [None] * len(cur_pred["axles"]))[i]
-        m_prev = (prev_norm.get("axle_kg") or [None] * len(cur_pred["axles"]))[i]
+
+    def component(key: str, label: str, m_cur: Optional[float], m_prev: Optional[float],
+                  cur_extra: float, prev_extra: float,
+                  cur_total: float, prev_total: float,
+                  axle_index: Optional[int] = None) -> None:
         if m_cur is None or m_prev is None:
-            continue
-        shed = m_prev - m_cur
-        predicted_shed = prev_pred["axles"][i]["total_kg"] - axle["total_kg"]
-        shed -= cur_pred["axles"][i]["extra_kg"] - prev_pred["axles"][i]["extra_kg"]
-        out.append({"key": f"delta_axle_{i}", "label": f"{axle['name']}轴卸载量",
-                    "axle_index": i,
-                    "measured": shed, "predicted": predicted_shed,
-                    "residual": shed - predicted_shed, "tolerance": tol * 2})
+            return
+        # Equipment-only mass shed: strip the declared non-equipment load on
+        # BOTH sides identically (fuel burn, crew change, etc.).  With each
+        # ticket matching its own theoretical value the residual is exactly zero
+        # regardless of how the fuel/crew load changed between weighings.
+        measured_shed = (m_prev - prev_extra) - (m_cur - cur_extra)
+        predicted_shed = (prev_total - prev_extra) - (cur_total - cur_extra)
+        row = {"key": key, "label": label,
+               "measured": measured_shed, "predicted": predicted_shed,
+               "residual": measured_shed - predicted_shed,
+               "tolerance": tol * 2}
+        if axle_index is not None:
+            row["axle_index"] = axle_index
+        out.append(row)
+
+    component(
+        "delta_gross", "总重卸载量",
+        cur_norm.get("gross_kg"), prev_norm.get("gross_kg"),
+        cur_pred["extra_mass_kg"], prev_pred["extra_mass_kg"],
+        cur_pred["gross_kg"], prev_pred["gross_kg"],
+    )
+    for i in range(n_axles):
+        m_cur = (cur_norm.get("axle_kg") or [None] * n_axles)[i]
+        m_prev = (prev_norm.get("axle_kg") or [None] * n_axles)[i]
+        axle = cur_pred["axles"][i]
+        component(
+            f"delta_axle_{i}", f"{axle['name']}轴卸载量",
+            m_cur, m_prev,
+            axle["extra_kg"], prev_pred["axles"][i]["extra_kg"],
+            axle["total_kg"], prev_pred["axles"][i]["total_kg"],
+            axle_index=i,
+        )
     return out
 
 

@@ -279,4 +279,77 @@ ev = must_ok(client.post(f"/api/plans/{plan_id}/weigh/after-ams/evaluate",
                          {"readings": early}))
 assert "TIME_ORDER" in [g["code"] for g in ev["gaps"]]
 
+# 11. defect 2: a reconciled ticket freezes (reviewer) WITHOUT a saved draft and
+#     WITHOUT events -> no actual version is derived.
+pred_dep = predicted_readings(state, "departure", {"fuel_l": 200, "crew_count": 3})
+recon_read = {
+    "gross_kg": round(pred_dep["gross_kg"]),
+    "axle_kg": [round(a["total_kg"]) for a in pred_dep["axles"]],
+    "tolerance_kg": 20, "scale_max_kg": 20000,
+    "fuel_l": 200, "crew_count": 3, "weighed_at": "2026-09-01T09:30",
+}
+before_max = max(v["version_no"] for v in
+                 must_ok(client.get(f"/api/plans/{plan_id}/versions"))["versions"])
+# overwrite the previously frozen departure (signature already changed by the
+# AMP-derived version, so the stale ticket is re-recordable with force)
+fz = must_ok(client.post(f"/api/plans/{plan_id}/weigh/departure/freeze",
+                         {"reviewer": "王五", "readings": recon_read,
+                          "events": [], "force": True}))
+assert fz["sheet"]["status"] == "frozen"
+assert fz["sheet"]["reviewer"] == "王五"
+assert fz["derived_version_no"] is None, fz["derived_version_no"]
+assert fz["sheet"]["derived_version_no"] is None
+assert fz["sheet"]["resolution"] == []
+after_max = max(v["version_no"] for v in
+                must_ok(client.get(f"/api/plans/{plan_id}/versions"))["versions"])
+assert after_max == before_max, "reconciled freeze must not create a version"
+
+# 12. defect 3: freeze an OUT-OF-TOLERANCE ticket directly from a candidate
+#     (no draft ever saved).  The confirmed events must land in resolution_json
+#     AND match the derived actual version.
+# Use a fresh plan so no after-ber sheet exists yet.
+new_plan = must_ok(client.post("/api/plans", {"name": "直冻结核对", "state": state}), 201)
+new_id = new_plan["id"]
+pber = predicted_readings(state, "after-ber", {"fuel_l": 60, "crew_count": 2})
+from weighing import axle_fractions
+b = next(b for b in __import__("planning").boxes_from(state) if b["id"] == "BER-LIGHT")
+fr = axle_fractions(state["truck"], b["x"] + b["dx"] / 2)
+ber_read = {
+    "gross_kg": round(pber["gross_kg"] + b["weight"]),
+    "axle_kg": [round(pber["axles"][i]["total_kg"] + b["weight"] * fr[i]) for i in range(2)],
+    "tolerance_kg": 20, "scale_max_kg": 20000,
+    "fuel_l": 60, "crew_count": 2, "weighed_at": "2026-09-03T10:00",
+}
+ber_ev = must_ok(client.post(f"/api/plans/{new_id}/weigh/after-ber/evaluate",
+                             {"readings": ber_read}))
+assert ber_ev["verdict"] == "out_of_tolerance"
+cand = ber_ev["candidates"][0]
+assert cand["events"][0]["kind"] == "extra" and cand["events"][0]["case_id"] == "BER-LIGHT"
+# no draft saved -> fetching the sheet before freeze must 404
+rv = client.get(f"/api/plans/{new_id}/weigh/sheets")
+assert all(s["stage"] != "after-ber" for s in json.loads(rv.body)["sheets"])
+events = [{"kind": e["kind"], "case_id": e["case_id"],
+           "present_prev": e["present_prev"], "dx_m": e.get("dx_m", 0),
+           "weight_delta_kg": e.get("weight_delta_kg", 0)} for e in cand["events"]]
+ber_fz = must_ok(client.post(f"/api/plans/{new_id}/weigh/after-ber/freeze",
+                             {"reviewer": "赵六", "readings": ber_read, "events": events}))
+assert ber_fz["derived_version_no"] is not None
+dno = ber_fz["derived_version_no"]
+# resolution persisted on the (previously nonexistent) sheet
+sheet = next(s for s in must_ok(client.get(f"/api/plans/{new_id}/weigh/sheets"))["sheets"]
+             if s["stage"] == "after-ber")
+assert sheet["status"] == "frozen"
+assert sheet["reviewer"] == "赵六"
+assert [e["case_id"] for e in sheet["resolution"]] == ["BER-LIGHT"]
+assert {e["kind"] for e in sheet["resolution"]} == {"extra"}
+assert sheet["derived_version_no"] == dno
+# the derived version reflects the same event: BER-LIGHT deferred to next stop
+ver = must_ok(client.get(f"/api/plans/{new_id}/versions/{dno}"))
+assert ver["status"] == "actual"
+ber_light = next(c for c in ver["state"]["cases"] if c["id"] == "BER-LIGHT")
+assert ber_light["stop_id"] == "par", ber_light["stop_id"]
+# and it is now the current (actual) state; the confirmed/plan snapshot is untouched
+cur = must_ok(client.get(f"/api/plans/{new_id}"))
+cur_light = next(c for c in cur["state"]["cases"] if c["id"] == "BER-LIGHT")
+assert cur_light["stop_id"] == "par"
 print("\nALL FLASK WEIGH-ENDPOINT TESTS PASS")

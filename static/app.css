@@ -339,6 +339,7 @@ tr.unplaced td { color: var(--muted); }
   padding: 8px 10px; font-size: 12px; display: grid; gap: 3px;
 }
 .weigh-gap.bad { border-left-color: var(--danger); background: #fef2f2; color: #991b1b; }
+.weigh-gap.weigh-ok { border-left-color: var(--success); background: #ecfdf5; color: #065f46; }
 .weigh-gap b { color: #92400e; }
 .weigh-gap.bad b { color: #991b1b; }
 .resid-table { width: 100%; font-size: 12px; border-collapse: collapse; }

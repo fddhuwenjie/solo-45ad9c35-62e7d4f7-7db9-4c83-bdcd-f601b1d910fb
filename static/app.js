@@ -1454,7 +1454,12 @@
         ${ev.gaps.map(g => `<div>· ${esc(g.message)} <code>${esc(g.code)}</code></div>`).join('')}</div>`;
     }
     if (ev.verdict === 'within_tolerance') {
-      html += '<div class="weigh-gap" style="border-left-color:var(--success);background:#ecfdf5;color:#065f46"><b>总重守恒、轴荷与卸载差均在秤误差范围内，核对通过。</b></div>';
+      html += '<div class="weigh-gap weigh-ok"><b>总重守恒、轴荷与卸载差均在秤误差范围内，核对通过。</b></div>';
+      html += `<div class="freeze-row">
+        <input id="wReviewer" placeholder="现场复核人姓名">
+        <button id="wFreezeOk" class="success">确认现场复核结果并冻结</button>
+        <span class="hint">核对通过、无异常项：冻结称重单但不派生实际装载版本，原计划保持不变。</span>
+      </div>`;
     }
     if (ev.candidates?.length) {
       html += `<h3>最少异常项候选（点选在侧视图高亮对各轴贡献）</h3>`;
@@ -1494,20 +1499,24 @@
     });
     const fz = $('#wFreeze');
     if (fz) fz.onclick = () => freezeWeigh(ev.candidates[weigh.selectedCandidate]);
+    const fzOk = $('#wFreezeOk');
+    if (fzOk) fzOk.onclick = () => freezeWeigh(null);
   }
 
   async function freezeWeigh(cand) {
     const reviewer = $('#wReviewer').value.trim();
     if (!reviewer) return toast('请填写现场复核人姓名', 'warn');
-    if (!cand) return;
     const readings = collectReadings();
-    const events = cand.events.map(e => ({
-      kind: e.kind, case_id: e.case_id, present_prev: e.present_prev !== false,
-      dx_m: e.dx_m || 0, weight_delta_kg: e.weight_delta_kg || 0,
-    }));
+    const events = cand
+      ? cand.events.map(e => ({
+          kind: e.kind, case_id: e.case_id, present_prev: e.present_prev !== false,
+          dx_m: e.dx_m || 0, weight_delta_kg: e.weight_delta_kg || 0,
+        }))
+      : [];
+    const force = true; // allow freezing a ticket without saving a draft first
     try {
       const data = await api(`/api/plans/${encodeURIComponent(planId)}/weigh/${encodeURIComponent(weigh.stage)}/freeze`,
-        {method: 'POST', body: JSON.stringify({reviewer, readings, events})});
+        {method: 'POST', body: JSON.stringify({reviewer, readings, events, force})});
       weigh.evaluation = data.evaluation;
       weigh.selectedCandidate = -1;
       state = data.plan.state;
